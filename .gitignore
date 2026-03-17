@@ -61,8 +61,10 @@ docs/plans/
 config.yaml
 *.ini
 .env
+.env.*
 .envrc
 secrets.json
+.chrome_profile/
 
 # -----------------------------------------------------------
 # Downloaded Images
@@ -75,9 +77,11 @@ images/
 downloaded_images/
 
 # -----------------------------------------------------------
-# SeleniumBase Files
+# SeleniumBase / Playwright Files
 # -----------------------------------------------------------
 downloaded_files/
+debug_artifacts/
+.playwright-cli/
 *.lock
 
 # -----------------------------------------------------------
@@ -93,6 +97,12 @@ output/
 *.tmp
 tmp/
 
+# Frontend build artifacts
+node_modules/
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
 # -----------------------------------------------------------
 # Exceptions (files that should be included despite patterns above)
 # -----------------------------------------------------------
@@ -100,6 +110,9 @@ tmp/
 !example_config.yaml
 !README.md
 !LICENSE
+!dashboard/package.json
+!dashboard/tsconfig.json
+!dashboard/package-lock.json
 
 # -----------------------------------------------------------
 # Output JSON Files

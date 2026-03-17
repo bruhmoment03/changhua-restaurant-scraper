@@ -7,13 +7,15 @@ Rotating JSON log files → configurable directory.
 
 import json
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
 from rich.logging import RichHandler
+
+
+_SUPPRESSED_ACCESS_PATH_PREFIXES = ("/jobs", "/progress")
 
 
 class _JsonFormatter(logging.Formatter):
@@ -29,6 +31,31 @@ class _JsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[0] is not None:
             entry["exc"] = self.formatException(record.exc_info)
         return json.dumps(entry, ensure_ascii=False)
+
+
+class _UvicornAccessFilter(logging.Filter):
+    """Suppress repetitive dashboard polling endpoints from uvicorn access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args if isinstance(record.args, tuple) else ()
+        if len(args) >= 3:
+            method = str(args[1])
+            path = str(args[2])
+            if method == "GET" and path.startswith(_SUPPRESSED_ACCESS_PATH_PREFIXES):
+                return False
+
+        message = record.getMessage()
+        if '"GET /jobs' in message or '"GET /progress' in message:
+            return False
+        return True
+
+
+def _install_uvicorn_access_filter() -> None:
+    """Keep high-frequency dashboard polls out of the terminal access log."""
+    access_logger = logging.getLogger("uvicorn.access")
+    if any(isinstance(existing, _UvicornAccessFilter) for existing in access_logger.filters):
+        return
+    access_logger.addFilter(_UvicornAccessFilter())
 
 
 def setup_logging(
@@ -89,3 +116,5 @@ def setup_logging(
     for noisy in ("selenium", "urllib3", "botocore", "boto3", "s3transfer",
                    "asyncio", "websockets", "httpcore", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    _install_uvicorn_access_filter()

@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 8 10 15;
+  --panel: 14 17 23;
+  --border: 38 42 51;
+  --text: 237 240 245;
+  --muted: 128 135 148;
+  --accent: 0 67 255;
+  --danger: 248 81 73;
+  --shadow-color: 0 0 0;
+}
+
+html,
+body {
+  height: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+@supports (overflow: clip) {
+  html,
+  body {
+    overflow-x: clip;
+  }
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif;
+  background-color: rgb(var(--bg));
+  color: rgb(var(--text));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-image:
+    radial-gradient(ellipse 900px 500px at 15% -5%, rgba(0, 67, 255, 0.12), transparent 60%),
+    radial-gradient(ellipse 600px 400px at 85% 10%, rgba(0, 67, 255, 0.06), transparent 50%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+* {
+  border-color: rgb(var(--border));
+}
+
+a {
+  color: rgb(var(--accent));
+}
+
+::selection {
+  background: rgba(0, 67, 255, 0.25);
+}
+
+.u-wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

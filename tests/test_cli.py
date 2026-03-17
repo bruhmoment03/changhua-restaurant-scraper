@@ -38,6 +38,19 @@ class TestParseArguments:
             assert args.command == "scrape"
             assert args.headless is True
 
+    def test_scrape_headed_flag(self):
+        with patch("sys.argv", ["start.py", "scrape", "--headed"]):
+            args = parse_arguments()
+            assert args.command == "scrape"
+            assert args.headed is True
+
+    def test_scrape_only_missing_and_max_businesses(self):
+        with patch("sys.argv", ["start.py", "scrape", "--only-missing", "--max-businesses", "7"]):
+            args = parse_arguments()
+            assert args.command == "scrape"
+            assert args.only_missing is True
+            assert args.max_businesses == 7
+
     def test_export_json(self):
         with patch("sys.argv", ["start.py", "export", "--format", "json",
                                  "--place-id", "test123"]):
@@ -58,6 +71,25 @@ class TestParseArguments:
         with patch("sys.argv", ["start.py", "db-stats"]):
             args = parse_arguments()
             assert args.command == "db-stats"
+
+    def test_progress_subcommand(self):
+        with patch("sys.argv", ["start.py", "progress", "--json", "--fail-if-incomplete"]):
+            args = parse_arguments()
+            assert args.command == "progress"
+            assert args.json is True
+            assert args.fail_if_incomplete is True
+
+    def test_config_before_subcommand_is_respected(self):
+        with patch("sys.argv", ["start.py", "--config", "batch/config.top50.yaml", "progress"]):
+            args = parse_arguments()
+            assert args.command == "progress"
+            assert str(args.config).endswith("batch/config.top50.yaml")
+
+    def test_db_path_before_subcommand_is_respected(self):
+        with patch("sys.argv", ["start.py", "--db-path", "/tmp/test.db", "db-stats"]):
+            args = parse_arguments()
+            assert args.command == "db-stats"
+            assert args.db_path == "/tmp/test.db"
 
     def test_clear_with_place_id(self):
         with patch("sys.argv", ["start.py", "clear", "--place-id", "p1",
@@ -122,6 +154,36 @@ class TestParseArguments:
         with patch("sys.argv", ["start.py", "-s", "newest"]):
             args = parse_arguments()
             assert args.sort_by == "newest"
+
+    def test_google_maps_auth_mode(self):
+        with patch("sys.argv", ["start.py", "--google-maps-auth-mode", "cookie"]):
+            args = parse_arguments()
+            assert args.google_maps_auth_mode == "cookie"
+
+    def test_fail_on_limited_view_flag(self):
+        with patch("sys.argv", ["start.py", "--fail-on-limited-view", "true"]):
+            args = parse_arguments()
+            assert args.fail_on_limited_view is True
+
+    def test_debug_artifacts_dir_flag(self):
+        with patch("sys.argv", ["start.py", "--debug-artifacts-dir", "/tmp/gmaps-debug"]):
+            args = parse_arguments()
+            assert args.debug_artifacts_dir == "/tmp/gmaps-debug"
+
+    def test_stealth_flags(self):
+        with patch(
+            "sys.argv",
+            [
+                "start.py",
+                "--stealth-undetectable",
+                "true",
+                "--stealth-user-agent",
+                "MyUA/1.0",
+            ],
+        ):
+            args = parse_arguments()
+            assert args.stealth_undetectable is True
+            assert args.stealth_user_agent == "MyUA/1.0"
 
     def test_stop_threshold(self):
         with patch("sys.argv", ["start.py", "--stop-threshold", "5"]):

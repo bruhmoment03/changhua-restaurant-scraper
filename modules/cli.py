@@ -3,6 +3,7 @@ Command line interface handling for Google Maps Reviews Scraper.
 
 Subcommands:
   scrape          Scrape reviews (default behavior)
+  progress        Show config-vs-DB progress for batch scraping
   export          Export reviews from DB to JSON/CSV
   db-stats        Show database statistics
   clear           Clear data for a place or all places
@@ -55,9 +56,38 @@ def _add_scrape_args(parser: argparse.ArgumentParser) -> None:
         help="run Chrome in the background",
     )
     parser.add_argument(
+        "--headed", action="store_true",
+        help="run Chrome with visible browser window (forces headless=false)",
+    )
+    parser.add_argument(
         "-s", "--sort", dest="sort_by",
         choices=("newest", "highest", "lowest", "relevance"),
         default=None, help="sorting order for reviews",
+    )
+    parser.add_argument(
+        "--google-maps-auth-mode", type=str, default=None,
+        choices=("anonymous", "cookie"),
+        help="Google Maps auth mode: anonymous (default) or cookie",
+    )
+    parser.add_argument(
+        "--fail-on-limited-view", type=_str_to_bool, default=None,
+        help="fail-fast if Google Maps limited view is detected (true/false)",
+    )
+    parser.add_argument(
+        "--debug-on-limited-view", type=_str_to_bool, default=None,
+        help="capture debug artifacts when limited view is detected (true/false)",
+    )
+    parser.add_argument(
+        "--debug-artifacts-dir", type=str, default=None,
+        help="directory for debug artifacts (screenshots + JSON diagnostics)",
+    )
+    parser.add_argument(
+        "--stealth-undetectable", type=_str_to_bool, default=None,
+        help="enable additional undetectable driver mode (true/false)",
+    )
+    parser.add_argument(
+        "--stealth-user-agent", type=str, default=None,
+        help="custom user-agent string for Chrome session",
     )
     parser.add_argument(
         "--scrape-mode", type=str, default=None,
@@ -83,6 +113,18 @@ def _add_scrape_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--url", type=str, default=None,
         help="Google Maps URL to scrape",
+    )
+    parser.add_argument(
+        "--only-missing", action="store_true", default=False,
+        help="for multi-business config, scrape only targets missing from DB progress",
+    )
+    parser.add_argument(
+        "--max-businesses", type=int, default=None,
+        help="limit number of businesses selected for this run",
+    )
+    parser.add_argument(
+        "-j", "--concurrency", type=int, default=3,
+        help="number of businesses to scrape in parallel (default: 3, max: 4)",
     )
     # Legacy flags — hidden but still accepted for backward compatibility
     parser.add_argument(
@@ -174,6 +216,18 @@ def _build_export_parser(sub: argparse._SubParsersAction) -> None:
 
 def _build_management_parsers(sub: argparse._SubParsersAction) -> None:
     """Build management subcommands."""
+    # progress
+    sp = sub.add_parser("progress", help="Show config-vs-DB progress for batch scraping")
+    _add_common_args(sp)
+    sp.add_argument(
+        "--json", action="store_true",
+        help="output machine-readable JSON",
+    )
+    sp.add_argument(
+        "--fail-if-incomplete", action="store_true",
+        help="exit with non-zero code if incomplete targets remain",
+    )
+
     # db-stats
     sp = sub.add_parser("db-stats", help="Show database statistics")
     _add_common_args(sp)
@@ -296,6 +350,12 @@ def _build_logs_parser(sub: argparse._SubParsersAction) -> None:
 
 def parse_arguments():
     """Parse command line arguments with subcommands."""
+    # Pre-parse shared flags so "--config/--db-path before subcommand" still works.
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config", type=str, default=None)
+    bootstrap.add_argument("--db-path", type=str, default=None)
+    bootstrap_args, _ = bootstrap.parse_known_args()
+
     ap = argparse.ArgumentParser(
         description="Google Maps Reviews Scraper Pro",
     )
@@ -313,6 +373,12 @@ def parse_arguments():
     _add_scrape_args(ap)
 
     args = ap.parse_args()
+
+    # Preserve top-level shared flags when argparse subcommand defaults overwrite them.
+    if getattr(args, "config", None) is None and bootstrap_args.config is not None:
+        args.config = bootstrap_args.config
+    if getattr(args, "db_path", None) is None and bootstrap_args.db_path is not None:
+        args.db_path = bootstrap_args.db_path
 
     # Default to scrape if no subcommand
     if args.command is None:

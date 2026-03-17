@@ -7,6 +7,7 @@ Uses its own tables (api_keys, api_audit_log) — no coupling to review schema.
 
 import hashlib
 import secrets
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
@@ -15,6 +16,8 @@ from modules.database_backend import SQLiteBackend
 _KEY_PREFIX = "grs_"
 _KEY_HEX_LEN = 32  # 32 hex chars = 16 bytes of entropy
 _DISPLAY_PREFIX_LEN = len(_KEY_PREFIX) + 8  # e.g. "grs_a1b2c3d4..."
+_AUDIT_WRITE_TIMEOUT_SEC = 0.2
+_AUDIT_WRITE_TIMEOUT_MS = int(_AUDIT_WRITE_TIMEOUT_SEC * 1000)
 
 _DDL = [
     """
@@ -140,14 +143,28 @@ class ApiKeyDB:
         status_code: Optional[int],
         response_time_ms: Optional[int],
     ) -> None:
-        """Insert a request audit row."""
-        self._db.execute(
-            "INSERT INTO api_audit_log "
-            "(key_id, key_name, endpoint, method, client_ip, status_code, response_time_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (key_id, key_name, endpoint, method, client_ip, status_code, response_time_ms),
-        )
-        self._db.commit()
+        """
+        Insert a request audit row.
+
+        Use a short-lived connection with a short busy timeout so telemetry never
+        blocks API responses behind a long-running scraper write transaction.
+        """
+        conn = sqlite3.connect(self._db.db_path, timeout=_AUDIT_WRITE_TIMEOUT_SEC)
+        try:
+            conn.execute(f"PRAGMA busy_timeout={_AUDIT_WRITE_TIMEOUT_MS}")
+            conn.execute(
+                "INSERT INTO api_audit_log "
+                "(key_id, key_name, endpoint, method, client_ip, status_code, response_time_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (key_id, key_name, endpoint, method, client_ip, status_code, response_time_ms),
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                return
+            raise
+        finally:
+            conn.close()
 
     def get_key_stats(self, key_id: int) -> Optional[Dict[str, Any]]:
         """Return key info plus recent audit summary."""

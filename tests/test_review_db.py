@@ -80,6 +80,18 @@ class TestPlaceOperations:
         places = db.list_places()
         assert len(places) == 2
 
+    def test_list_places_uses_live_review_counts(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_review("p1", _make_review("r1"))
+        db.upsert_review("p1", _make_review("r2"))
+        # Simulate stale denormalized value in places table
+        db.backend.execute("UPDATE places SET total_reviews = 0 WHERE place_id = 'p1'")
+        db.backend.commit()
+
+        places = db.list_places()
+        row = next(p for p in places if p["place_id"] == "p1")
+        assert row["total_reviews"] == 2
+
 
 class TestReviewOperations:
     """Review CRUD and dedup tests."""
@@ -259,6 +271,17 @@ class TestSessionTracking:
         assert session["status"] == "completed"
         assert session["reviews_new"] == 10
 
+    def test_end_session_marks_place_exhausted_when_reached_end(self, db):
+        db.upsert_place("place1", "Test", "http://test")
+        sid = db.start_session("place1")
+        db.end_session(sid, "completed", reached_end=True)
+        place = db.backend.fetchone(
+            "SELECT reviews_exhausted, exhausted_at FROM places WHERE place_id = ?",
+            ("place1",),
+        )
+        assert place["reviews_exhausted"] == 1
+        assert place["exhausted_at"] is not None
+
     def test_end_session_failed(self, db):
         db.upsert_place("place1", "Test", "http://test")
         sid = db.start_session("place1")
@@ -302,6 +325,54 @@ class TestExport:
         count = db.export_reviews_csv("place1", path)
         assert count == 1
         assert os.path.exists(path)
+
+    def test_export_place_json_payload_includes_meta_and_provenance(self, db):
+        db.upsert_place("place1", "Test", "http://test")
+        sid = db.start_session("place1", sort_by="newest")
+        db.upsert_review("place1", _make_review("r1", text="Hello"), session_id=sid)
+        db.end_session(sid, "completed", reviews_found=1, reviews_new=1, reached_end=False)
+
+        payload = db.export_place_json_payload("place1")
+        assert payload["place"]["place_id"] == "place1"
+        assert payload["export_meta"]["scope"] == "place"
+        assert payload["export_meta"]["format"] == "json"
+        assert len(payload["reviews"]) == 1
+        prov = payload["reviews"][0]["provenance"]
+        assert prov["source_url"] == "http://test"
+        assert prov["scrape_session_id"] == sid
+        assert prov["sort_order_requested"] == "newest"
+        assert prov["extraction_confidence"] == "good"
+
+    def test_export_all_flat_rows_contains_required_columns(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_review("p1", _make_review("r1", text="Hello world", lang="zh-TW"))
+
+        rows = db.export_all_flat_rows()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["place_id"] == "p1"
+        assert row["review_id"] == "r1"
+        assert row["review_text_primary"] == "Hello world"
+        assert row["source_locale"] == "zh-TW"
+        assert "review_text_all_json" in row
+        assert "owner_responses_json" in row
+
+    def test_cross_place_conflicts_only_returns_multiple_real_places_by_default(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_place("p2", "Place 2", "http://2")
+        db.upsert_place("hash:abc", "Google 地圖", "http://maps")
+
+        review = _make_review("shared")
+        db.upsert_review("p1", review)
+        db.upsert_review("hash:abc", review)
+
+        assert db.get_cross_place_conflicts() == []
+
+        db.upsert_review("p2", review)
+        conflicts = db.get_cross_place_conflicts()
+        assert len(conflicts) == 1
+        assert conflicts[0]["has_multiple_real_places"] is True
+        assert conflicts[0]["has_hash_placeholder"] is True
 
 
 class TestSyncCheckpoints:
@@ -352,7 +423,7 @@ class TestSchemaVersioning:
     """Tests for schema management."""
 
     def test_schema_version_on_init(self, db):
-        assert db.get_schema_version() == 1
+        assert db.get_schema_version() == 3
 
     def test_schema_migration_idempotent(self, tmp_path):
         db1 = ReviewDB(str(tmp_path / "test.db"))
@@ -534,6 +605,95 @@ class TestReviewManagement:
         assert "cli_restore" in actors
 
 
+class TestCrossPlaceCleanup:
+    """Tests for cross-place duplicate cleanup."""
+
+    def test_cleanup_cross_place_duplicates_defaults_to_hash_only_when_real_places_conflict(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_place("p2", "Place 2", "http://2")
+        db.upsert_place("hash:deadbeef", "Google 地圖", "http://bad")
+
+        s1 = db.start_session("p1")
+        s2 = db.start_session("p2")
+        s3 = db.start_session("hash:deadbeef")
+
+        review = _make_review("shared", text="Same review everywhere")
+        db.upsert_review("p1", review, session_id=s1)
+        db.upsert_review("p2", review, session_id=s2)
+        db.upsert_review("hash:deadbeef", review, session_id=s3)
+
+        stats = db.cleanup_cross_place_duplicates()
+
+        assert stats["duplicate_groups"] == 1
+        assert stats["extra_rows"] == 2
+        assert stats["soft_deleted_rows"] == 1
+        assert stats["ambiguous_groups"] == 1
+        assert stats["ambiguous_extra_rows"] == 1
+        assert db.get_review("shared", "p1")["is_deleted"] == 0
+        assert db.get_review("shared", "p2")["is_deleted"] == 0
+        assert db.get_review("shared", "hash:deadbeef")["is_deleted"] == 1
+
+        history = db.get_review_history("shared", "hash:deadbeef")
+        assert any(h["actor"] == "maintenance_cross_place_cleanup" for h in history)
+
+    def test_cleanup_cross_place_duplicates_prefers_fresh_non_hash_owner_when_opted_in(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_place("p2", "Place 2", "http://2")
+        db.upsert_place("hash:deadbeef", "Google 地圖", "http://bad")
+
+        s1 = db.start_session("p1")
+        s2 = db.start_session("p2")
+        s3 = db.start_session("hash:deadbeef")
+
+        review = _make_review("shared", text="Same review everywhere")
+        db.upsert_review("p1", review, session_id=s1)
+        db.upsert_review("p2", review, session_id=s2)
+        db.upsert_review("hash:deadbeef", review, session_id=s3)
+
+        stats = db.cleanup_cross_place_duplicates(include_real_place_conflicts=True)
+
+        assert stats["duplicate_groups"] == 1
+        assert stats["extra_rows"] == 2
+        assert stats["soft_deleted_rows"] == 2
+        assert stats["ambiguous_groups"] == 0
+        assert db.get_review("shared", "p1")["is_deleted"] == 1
+        assert db.get_review("shared", "p2")["is_deleted"] == 0
+        assert db.get_review("shared", "hash:deadbeef")["is_deleted"] == 1
+
+    def test_cleanup_cross_place_duplicates_dry_run_does_not_mutate(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_place("p2", "Place 2", "http://2")
+
+        review = _make_review("shared", text="Same review everywhere")
+        db.upsert_review("p1", review)
+        db.upsert_review("p2", review)
+
+        stats = db.cleanup_cross_place_duplicates(dry_run=True)
+
+        assert stats["dry_run"] is True
+        assert stats["duplicate_groups"] == 1
+        assert stats["extra_rows"] == 1
+        assert stats["soft_deleted_rows"] == 0
+        assert stats["ambiguous_groups"] == 1
+        assert stats["ambiguous_extra_rows"] == 1
+        assert db.get_review("shared", "p1")["is_deleted"] == 0
+        assert db.get_review("shared", "p2")["is_deleted"] == 0
+
+    def test_revert_cross_place_cleanup_restores_rows(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_place("hash:deadbeef", "Google 地圖", "http://bad")
+        review = _make_review("shared", text="Same review everywhere")
+        db.upsert_review("p1", review)
+        db.upsert_review("hash:deadbeef", review)
+
+        db.cleanup_cross_place_duplicates()
+        stats = db.revert_cross_place_cleanup()
+
+        assert stats["restorable_rows"] == 1
+        assert stats["restored_rows"] == 1
+        assert db.get_review("shared", "hash:deadbeef")["is_deleted"] == 0
+
+
 class TestDatabaseManagement:
     """Tests for DB management operations."""
 
@@ -556,16 +716,106 @@ class TestDatabaseManagement:
     def test_get_stats(self, db):
         db.upsert_place("place1", "Test", "http://test")
         db.upsert_review("place1", _make_review("r1"))
+        # Force stale denormalized column; get_stats should still compute actual count from reviews.
+        db.backend.execute(
+            "UPDATE places SET total_reviews = 0 WHERE place_id = ?",
+            ("place1",),
+        )
+        db.backend.commit()
         stats = db.get_stats()
         assert stats["places_count"] == 1
         assert stats["reviews_count"] == 1
         assert stats["db_size_bytes"] > 0
+        place_row = next(p for p in stats["places"] if p["place_id"] == "place1")
+        assert place_row["total_reviews"] == 1
 
     def test_vacuum(self, db):
         db.upsert_place("place1", "Test", "http://test")
         db.upsert_review("place1", _make_review("r1"))
         db.clear_all()
         db.vacuum()  # should not raise
+
+    def test_rebuild_place_total_reviews_updates_stale_cache(self, db):
+        db.upsert_place("place1", "Test", "http://test")
+        db.upsert_review("place1", _make_review("r1"))
+        db.backend.execute(
+            "UPDATE places SET total_reviews = 0 WHERE place_id = ?",
+            ("place1",),
+        )
+        db.backend.commit()
+
+        result = db.rebuild_place_total_reviews()
+
+        assert result["updated_count"] == 1
+        place = db.get_place("place1")
+        assert place["cached_total_reviews"] == 1
+        assert place["total_reviews"] == 1
+
+
+class TestValidationAndDiscovery:
+    def test_record_place_validation_updates_place_and_log(self, db):
+        db.upsert_place("place1", "Test Place", "https://www.google.com/maps/search/?api=1&query=Test&query_place_id=PID_TEST")
+
+        result = db.record_place_validation(
+            place_id="place1",
+            google_place_id="PID_TEST",
+            config_path="batch/config.top50.yaml",
+            expected_name="Test Place",
+            status="invalid_mismatch",
+            reason="Expected Test Place",
+            api_name="Other Place",
+            api_address="Addr",
+            business_status="OPERATIONAL",
+            checked_at="2026-03-09T00:00:00+00:00",
+            response_payload={"status": "invalid_mismatch"},
+        )
+
+        assert result["status"] == "invalid_mismatch"
+        place = db.get_place("place1")
+        assert place["validation_status"] == "invalid_mismatch"
+        latest = db.get_latest_place_validation(place_id="place1")
+        assert latest is not None
+        assert latest["api_name"] == "Other Place"
+
+    def test_upsert_discovery_candidates_preserves_approved_status(self, db):
+        rows = db.upsert_discovery_candidates(
+            config_path="/tmp/config.yaml",
+            query="restaurants",
+            candidates=[
+                {
+                    "google_place_id": "PID_A",
+                    "name": "Place A",
+                    "formatted_address": "Addr A",
+                    "rating": 4.8,
+                    "user_ratings_total": 120,
+                    "maps_url": "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+                    "status": "staged",
+                    "duplicate_source": None,
+                    "source_payload": {"place_id": "PID_A"},
+                }
+            ],
+        )
+        db.update_discovery_candidate_status([rows[0]["candidate_id"]], "approved")
+
+        refreshed = db.upsert_discovery_candidates(
+            config_path="/tmp/config.yaml",
+            query="restaurants",
+            candidates=[
+                {
+                    "google_place_id": "PID_A",
+                    "name": "Place A Updated",
+                    "formatted_address": "Addr A",
+                    "rating": 4.9,
+                    "user_ratings_total": 200,
+                    "maps_url": "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+                    "status": "duplicate_db",
+                    "duplicate_source": "db",
+                    "source_payload": {"place_id": "PID_A"},
+                }
+            ],
+        )
+
+        assert refreshed[0]["status"] == "approved"
 
 
 class TestHistoryManagement:

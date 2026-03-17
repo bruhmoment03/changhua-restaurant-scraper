@@ -54,11 +54,19 @@ class TestNewDefaults:
 
     def test_max_scroll_attempts_default(self, tmp_path):
         config = load_config(tmp_path / "config.yaml")
-        assert config["max_scroll_attempts"] == 50
+        assert config["max_scroll_attempts"] == 10
 
     def test_scroll_idle_limit_default(self, tmp_path):
         config = load_config(tmp_path / "config.yaml")
-        assert config["scroll_idle_limit"] == 15
+        assert config["scroll_idle_limit"] == 10
+
+    def test_google_maps_auth_mode_default(self, tmp_path):
+        config = load_config(tmp_path / "config.yaml")
+        assert config["google_maps_auth_mode"] == "anonymous"
+
+    def test_debug_on_limited_view_default(self, tmp_path):
+        config = load_config(tmp_path / "config.yaml")
+        assert config["debug_on_limited_view"] is True
 
 
 class TestAliasResolution:
@@ -121,3 +129,20 @@ class TestValidation:
         config = {"max_reviews": "abc"}
         _validate_config(config)
         assert config["max_reviews"] == DEFAULT_CONFIG["max_reviews"]
+
+    def test_scroll_limits_are_clamped(self):
+        config = {"max_scroll_attempts": 120, "scroll_idle_limit": 40}
+        _validate_config(config)
+        assert config["max_scroll_attempts"] == 10
+        assert config["scroll_idle_limit"] == 10
+
+    def test_invalid_auth_mode_fallback(self):
+        config = {"google_maps_auth_mode": "invalid"}
+        _validate_config(config)
+        assert config["google_maps_auth_mode"] == "anonymous"
+
+    def test_invalid_bool_falls_back(self):
+        config = {"debug_on_limited_view": "yes", "stealth_undetectable": "true"}
+        _validate_config(config)
+        assert config["debug_on_limited_view"] == DEFAULT_CONFIG["debug_on_limited_view"]
+        assert config["stealth_undetectable"] == DEFAULT_CONFIG["stealth_undetectable"]

@@ -4,16 +4,26 @@ Uses SeleniumBase UC Mode for enhanced anti-detection and better Chrome version 
 """
 
 import logging
+import hashlib
+import json
 import os
 import platform
 import re
 import threading
 import time
 import traceback
-from typing import Dict, Any, List
+import urllib.parse
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Any, List, Tuple
 
 from seleniumbase import Driver
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    InvalidSessionIdException,
+    NoSuchWindowException,
+)
 from selenium.webdriver import Chrome
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
@@ -21,7 +31,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, MofNCompleteColumn
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
 from modules.models import RawReview
 from modules.pipeline import PostScrapeRunner
@@ -31,9 +41,53 @@ from modules.place_id import extract_place_id
 # Logger
 log = logging.getLogger("scraper")
 
+# Cookie-auth environment contract:
+# - Required env vars stay stable: GOOGLE_MAPS_COOKIE_1PSID, GOOGLE_MAPS_COOKIE_1PSIDTS
+# - Injection sets both legacy and secure-prefixed cookie names from each required env value.
+REQUIRED_COOKIE_ENV_ALIASES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("GOOGLE_MAPS_COOKIE_1PSID", ("1PSID", "__Secure-1PSID")),
+    ("GOOGLE_MAPS_COOKIE_1PSIDTS", ("1PSIDTS", "__Secure-1PSIDTS")),
+)
+OPTIONAL_COOKIE_ENV_VARS: Tuple[Tuple[str, str], ...] = (
+    ("SID", "GOOGLE_MAPS_COOKIE_SID"),
+    ("HSID", "GOOGLE_MAPS_COOKIE_HSID"),
+    ("SSID", "GOOGLE_MAPS_COOKIE_SSID"),
+    ("SAPISID", "GOOGLE_MAPS_COOKIE_SAPISID"),
+)
+
+LIMITED_VIEW_MARKERS = (
+    "limited view",
+    "you are seeing a limited view of google maps",
+    "you're seeing a limited view of google maps",
+    "learn more about limited view",
+    "目前看到的 google 地圖內容受限",
+    "google 地图内容受限",
+    "contenido limitado",
+    "vue limitée",
+)
+SIGNED_OUT_MARKERS = (
+    "sign in",
+    "get the most out of google maps",
+    "登入",
+    "充分運用 google 地圖",
+    "connexion",
+)
+SEARCH_RESULTS_LIST_MARKERS = (
+    "you've reached end of search results",
+    "you've reached the end of search results",
+    "you reached end of search results",
+    "you reached the end of search results",
+    "你已看完所有搜尋結果",
+    "你已看完所有搜索结果",
+    "已看完所有搜尋結果",
+    "已看完所有搜索结果",
+)
+
 # CSS Selectors
 PANE_SEL = 'div[role="main"] div.m6QErb.DxyBCb.kA9KIf.dS8AEf'
-CARD_SEL = "div[data-review-id]"
+# Google frequently changes review card markup. Support both the historical attribute
+# and the common card class as a fallback.
+CARD_SEL = "div[data-review-id], div.jftiEf"
 COOKIE_BTN = ('button[aria-label*="Accept" i],'
               'button[jsname="hZCF7e"],'
               'button[data-mdc-dialog-action="accept"]')
@@ -161,6 +215,29 @@ REVIEW_WORDS = {
 }
 
 
+class LimitedViewError(RuntimeError):
+    """Raised when Google Maps limited-view prevents scraping reviews."""
+
+
+def _is_transient_browser_error(message: str) -> bool:
+    """Return True when message indicates retryable browser/network failures."""
+    lower = (message or "").lower()
+    if not lower or "limited view" in lower:
+        return False
+    markers = (
+        "err_internet_disconnected",
+        "invalid session id",
+        "no such window",
+        "web view not found",
+        "disconnected",
+        "timed out",
+        "timeout",
+        "chrome not reachable",
+        "unable to receive message from renderer",
+    )
+    return any(marker in lower for marker in markers)
+
+
 class GoogleReviewsScraper:
     """Main scraper class for Google Maps reviews"""
 
@@ -168,10 +245,359 @@ class GoogleReviewsScraper:
                  cancel_event: threading.Event | None = None):
         """Initialize scraper with configuration"""
         self.config = config
+        self.job_id = str(config.get("job_id") or "manual")
         self.scrape_mode = config.get("scrape_mode", "update")
         self.cancel_event = cancel_event or threading.Event()
+        self.google_maps_auth_mode = str(
+            config.get("google_maps_auth_mode", "anonymous")
+        ).strip().lower() or "anonymous"
+        if self.google_maps_auth_mode not in ("anonymous", "cookie"):
+            log.warning(
+                "Invalid google_maps_auth_mode '%s', falling back to 'anonymous'",
+                self.google_maps_auth_mode,
+            )
+            self.google_maps_auth_mode = "anonymous"
+
+        fail_on_limited_view = config.get("fail_on_limited_view", None)
+        if fail_on_limited_view is None:
+            fail_on_limited_view = self.google_maps_auth_mode == "cookie"
+        self.fail_on_limited_view = bool(fail_on_limited_view)
+
+        self.debug_on_limited_view = bool(config.get("debug_on_limited_view", True))
+        self.debug_artifacts_dir = str(config.get("debug_artifacts_dir", "debug_artifacts"))
+        self.stealth_undetectable = bool(config.get("stealth_undetectable", False))
+        self.stealth_user_agent = str(config.get("stealth_user_agent", "") or "").strip()
+
+        if self.google_maps_auth_mode == "cookie":
+            self._validate_cookie_auth_env()
+
         db_path = config.get("db_path", "reviews.db")
         self.review_db = ReviewDB(db_path)
+        self.last_error_message = ""
+        self.last_error_transient = False
+
+    def _validate_cookie_auth_env(self) -> None:
+        """Validate required cookie env vars for cookie-auth mode."""
+        missing = [
+            env_name
+            for env_name, _ in REQUIRED_COOKIE_ENV_ALIASES
+            if not (os.environ.get(env_name) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "Cookie auth mode requires environment variables: "
+                + ", ".join(missing)
+            )
+
+    def _read_cookie_env_values(self) -> Dict[str, str]:
+        """Read cookie values from environment variables."""
+        cookies: Dict[str, str] = {}
+        for env_name, cookie_aliases in REQUIRED_COOKIE_ENV_ALIASES:
+            value = (os.environ.get(env_name) or "").strip()
+            if value:
+                for cookie_name in cookie_aliases:
+                    cookies[cookie_name] = value
+        for cookie_name, env_name in OPTIONAL_COOKIE_ENV_VARS:
+            value = (os.environ.get(env_name) or "").strip()
+            if value:
+                cookies[cookie_name] = value
+        return cookies
+
+    def _inject_google_cookies(self, driver: Chrome) -> None:
+        """Inject Google auth cookies into the browser session."""
+        if self.google_maps_auth_mode != "cookie":
+            return
+
+        cookies = self._read_cookie_env_values()
+        for name, value in cookies.items():
+            driver.add_cookie(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".google.com",
+                    "path": "/",
+                    "secure": True,
+                }
+            )
+
+        driver.refresh()
+        time.sleep(1.5)
+        present = {c.get("name", "") for c in driver.get_cookies()}
+        required_missing = [
+            env_name
+            for env_name, cookie_aliases in REQUIRED_COOKIE_ENV_ALIASES
+            if not any(cookie_name in present for cookie_name in cookie_aliases)
+        ]
+        if required_missing:
+            raise LimitedViewError(
+                "Cookie injection failed to confirm required cookie groups for env vars: "
+                + ", ".join(required_missing)
+            )
+
+        log.info("Cookie auth injection complete (%d cookies set)", len(cookies))
+
+    @staticmethod
+    def _sanitize_filename(value: str, max_len: int = 80) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value or "").strip("._")
+        return (safe[:max_len] or "unknown").strip("._")
+
+    def _collect_review_surface_counts(self, driver: Chrome) -> Dict[str, int]:
+        """Count review-related UI signals on the current page."""
+        counts = {
+            "cards_data_review_id": 0,
+            "cards_jftiEf": 0,
+            "sort_buttons": 0,
+            "review_tabs": 0,
+            "review_url_hint": 0,
+        }
+        try:
+            counts["cards_data_review_id"] = len(
+                driver.find_elements(By.CSS_SELECTOR, "div[data-review-id]")
+            )
+            counts["cards_jftiEf"] = len(
+                driver.find_elements(By.CSS_SELECTOR, "div.jftiEf")
+            )
+            counts["sort_buttons"] = len(
+                driver.find_elements(
+                    By.CSS_SELECTOR,
+                    'button[aria-label*="Sort" i], button.HQzyZ[aria-haspopup="true"]',
+                )
+            )
+            tabs = driver.find_elements(By.CSS_SELECTOR, '[role="tab"]')
+            counts["review_tabs"] = sum(1 for t in tabs if self.is_reviews_tab(t))
+            counts["review_url_hint"] = int("review" in (driver.current_url or "").lower())
+        except Exception:
+            pass
+        return counts
+
+    def _is_limited_view(self, driver: Chrome, stage: str = "") -> Tuple[bool, Dict[str, Any]]:
+        """Detect if the current page is in Google Maps limited-view mode."""
+        def _safe_current_url() -> str:
+            try:
+                return driver.current_url or ""
+            except Exception:
+                return ""
+
+        body_text = ""
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text or ""
+        except Exception:
+            pass
+
+        body_lower = body_text.lower()
+        explicit_limited = any(marker in body_lower for marker in LIMITED_VIEW_MARKERS)
+        signed_out_hint = any(marker in body_lower for marker in SIGNED_OUT_MARKERS)
+        counts = self._collect_review_surface_counts(driver)
+        has_review_surface = (
+            counts["cards_data_review_id"] > 0
+            or counts["cards_jftiEf"] > 0
+            or counts["sort_buttons"] > 0
+            or (counts["review_tabs"] > 0 and counts["review_url_hint"] > 0)
+        )
+
+        if has_review_surface:
+            limited = False
+        else:
+            limited = explicit_limited or (
+                signed_out_hint and counts["review_url_hint"] == 0
+            )
+        details = {
+            "stage": stage,
+            "explicit_limited": explicit_limited,
+            "signed_out_hint": signed_out_hint,
+            "has_review_surface": has_review_surface,
+            "counts": counts,
+            "url": _safe_current_url(),
+        }
+        return limited, details
+
+    def _write_debug_artifacts(
+        self,
+        driver: Chrome,
+        place_hint: str,
+        stage: str,
+        details: Dict[str, Any],
+    ) -> None:
+        """Save screenshot + JSON diagnostics for troubleshooting."""
+        if not self.debug_on_limited_view:
+            return
+
+        try:
+            target_dir = Path(self.debug_artifacts_dir)
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            base = f"{timestamp}_{self._sanitize_filename(stage)}_{self._sanitize_filename(place_hint)}"
+            png_path = target_dir / f"{base}.png"
+            json_path = target_dir / f"{base}.json"
+
+            try:
+                driver.save_screenshot(str(png_path))
+            except Exception:
+                pass
+
+            body_snippet = ""
+            try:
+                body = driver.find_element(By.TAG_NAME, "body").text or ""
+                body_snippet = " ".join(body.split())[:2000]
+            except Exception:
+                pass
+
+            payload = {
+                "ts_utc": timestamp,
+                "stage": stage,
+                "place_hint": place_hint,
+                "url": "",
+                "title": "",
+                "details": details,
+                "review_surface_counts": self._collect_review_surface_counts(driver),
+                "body_snippet": body_snippet,
+            }
+            try:
+                payload["url"] = driver.current_url or ""
+            except Exception:
+                payload["url"] = ""
+            try:
+                payload["title"] = driver.title or ""
+            except Exception:
+                payload["title"] = ""
+            with open(json_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.debug("Failed to write debug artifacts: %s", e)
+
+    def _handle_limited_view(
+        self,
+        driver: Chrome,
+        stage: str,
+        place_hint: str = "",
+        *,
+        strict: bool,
+    ) -> bool:
+        """Log, artifact, and optionally fail-fast when limited view is detected."""
+        limited, details = self._is_limited_view(driver, stage=stage)
+        if not limited:
+            return False
+
+        log.warning("Google Maps limited view detected at stage '%s'", stage)
+        self._write_debug_artifacts(driver, place_hint or "place", stage, details)
+
+        if strict and self.google_maps_auth_mode == "cookie" and self.fail_on_limited_view:
+            raise LimitedViewError(
+                "Limited view detected while using cookie auth. "
+                "Verify GOOGLE_MAPS_COOKIE_1PSID / GOOGLE_MAPS_COOKIE_1PSIDTS are valid and unexpired."
+            )
+        return True
+
+    def _has_reviews_surface(self, driver: Chrome) -> bool:
+        counts = self._collect_review_surface_counts(driver)
+        return (
+            counts["cards_data_review_id"] > 0
+            or counts["cards_jftiEf"] > 0
+            or counts["sort_buttons"] > 0
+            or (counts["review_tabs"] > 0 and counts["review_url_hint"] > 0)
+        )
+
+    def _is_reviews_tab_selected(self, driver: Chrome) -> bool:
+        """Return True only when the actual Reviews tab is currently selected."""
+        try:
+            for tab in driver.find_elements(By.CSS_SELECTOR, '[role="tab"]'):
+                try:
+                    if self.is_reviews_tab(tab) and (tab.get_attribute("aria-selected") or "").lower() == "true":
+                        return True
+                except StaleElementReferenceException:
+                    continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _count_displayed_matches(scope, selector: str, limit: int = 6) -> int:
+        """Count displayed elements for a selector, bounded to avoid expensive scans."""
+        count = 0
+        try:
+            for element in scope.find_elements(By.CSS_SELECTOR, selector):
+                try:
+                    if element.is_displayed():
+                        count += 1
+                        if count >= limit:
+                            break
+                except StaleElementReferenceException:
+                    continue
+                except Exception:
+                    continue
+        except Exception:
+            return 0
+        return count
+
+    @staticmethod
+    def _review_fingerprint(
+        *,
+        author: str = "",
+        rating: float = 0.0,
+        text: Any = "",
+        review_date: str = "",
+        raw_date: str = "",
+        profile: str = "",
+    ) -> str:
+        """Build a stable semantic fingerprint to suppress duplicate review cards."""
+        if isinstance(text, dict):
+            text_value = " ".join(
+                str(v).strip() for _, v in sorted(text.items()) if str(v).strip()
+            )
+        else:
+            text_value = str(text or "").strip()
+
+        date_value = str(review_date or raw_date or "").strip()
+        author_value = str(author or "").strip().lower()
+        profile_value = str(profile or "").strip().lower()
+        if not any((author_value, text_value, date_value, profile_value, rating)):
+            return ""
+
+        payload = "|".join(
+            [
+                author_value,
+                f"{float(rating or 0.0):.1f}",
+                text_value,
+                date_value,
+                profile_value,
+            ]
+        )
+        return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _has_active_reviews_surface(self, driver: Chrome) -> bool:
+        """
+        Detect whether the page is actively on the Reviews surface, not merely
+        carrying hidden review DOM somewhere under the Overview tab.
+        """
+        if self._is_reviews_tab_selected(driver):
+            return True
+
+        try:
+            if "review" in (driver.current_url or "").lower():
+                return True
+        except Exception:
+            pass
+
+        try:
+            sort_buttons = driver.find_elements(
+                By.CSS_SELECTOR,
+                'button[aria-label*="Sort" i], button.HQzyZ[aria-haspopup="true"]',
+            )
+            for button in sort_buttons:
+                try:
+                    if button.is_displayed():
+                        return True
+                except StaleElementReferenceException:
+                    continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        return self._count_displayed_matches(driver, CARD_SEL) > 0
 
     @staticmethod
     def _db_review_to_legacy(db_review: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,6 +635,12 @@ class GoogleReviewsScraper:
 
         # Determine if we're running in a container
         in_container = os.environ.get('CHROME_BIN') is not None
+        user_data_dir = (self.config.get("chrome_user_data_dir") or "").strip() or None
+        stealth_kwargs: Dict[str, Any] = {}
+        if self.stealth_undetectable:
+            stealth_kwargs["undetectable"] = True
+        if self.stealth_user_agent:
+            stealth_kwargs["agent"] = self.stealth_user_agent
 
         if in_container:
             chrome_binary = os.environ.get('CHROME_BIN')
@@ -222,7 +654,9 @@ class GoogleReviewsScraper:
                         uc=True,
                         headless=headless,
                         binary_location=chrome_binary,
-                        page_load_strategy="normal"
+                        user_data_dir=user_data_dir,
+                        page_load_strategy="normal",
+                        **stealth_kwargs,
                     )
                     log.info("Successfully created SeleniumBase UC driver with custom binary")
                 except Exception as e:
@@ -231,14 +665,18 @@ class GoogleReviewsScraper:
                     driver = Driver(
                         uc=True,
                         headless=headless,
-                        page_load_strategy="normal"
+                        user_data_dir=user_data_dir,
+                        page_load_strategy="normal",
+                        **stealth_kwargs,
                     )
                     log.info("Successfully created SeleniumBase UC driver with defaults")
             else:
                 driver = Driver(
                     uc=True,
                     headless=headless,
-                    page_load_strategy="normal"
+                    user_data_dir=user_data_dir,
+                    page_load_strategy="normal",
+                    **stealth_kwargs,
                 )
                 log.info("Successfully created SeleniumBase UC driver")
         else:
@@ -249,7 +687,10 @@ class GoogleReviewsScraper:
                     uc=True,
                     headless=headless,
                     page_load_strategy="normal",
-                    incognito=True  # Use incognito mode for better stealth
+                    # If using a persistent profile, incognito would defeat cookie reuse.
+                    incognito=(user_data_dir is None),
+                    user_data_dir=user_data_dir,
+                    **stealth_kwargs,
                 )
                 log.info("Successfully created SeleniumBase UC driver")
             except Exception as e:
@@ -314,14 +755,38 @@ class GoogleReviewsScraper:
         Extract the place name from a Google Maps URL.
         Tries URL decoding first, then falls back to loading the page.
         """
-        import urllib.parse
+        def _clean_name(value: str) -> str:
+            name = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', (value or "")).strip()
+            if not name:
+                return ""
+            if name.lower() in {
+                "google maps",
+                "google 地圖",
+                "google 地图",
+                "google マップ",
+                "google 지도",
+            }:
+                return ""
+            return name
+
+        # Most dashboard targets are search URLs with `query=...`.
+        # Parse this first so we don't need to load a potentially ambiguous page.
+        try:
+            parsed = urllib.parse.urlparse(url or "")
+            query = urllib.parse.parse_qs(parsed.query)
+            raw_query = ((query.get("query") or [""])[0] or "").strip()
+            if raw_query:
+                query_name = _clean_name(urllib.parse.unquote_plus(raw_query))
+                if len(query_name) > 2:
+                    log.info(f"Extracted place name from URL query: '{query_name}'")
+                    return query_name
+        except Exception as e:
+            log.debug(f"Could not extract place name from query param: {e}")
 
         # Try to extract from URL path (e.g. /maps/place/PLACE+NAME/...)
         match = re.search(r'/maps/place/([^/@]+)', url)
         if match:
-            name = urllib.parse.unquote(match.group(1))
-            # Remove Unicode control characters
-            name = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', name)
+            name = _clean_name(urllib.parse.unquote(match.group(1)))
             if len(name) > 2:
                 log.info(f"Extracted place name from URL: '{name}'")
                 return name
@@ -331,10 +796,8 @@ class GoogleReviewsScraper:
         try:
             driver.get(url)
             time.sleep(4)
-            # Get the page title - usually "Place Name - Google Maps"
-            title = driver.title or ""
-            name = title.replace(" - Google Maps", "").strip()
-            name = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', name)
+            title = self._clean_title_place_name(driver.title or "")
+            name = _clean_name(title)
             if name:
                 log.info(f"Extracted place name from page title: '{name}'")
                 return name
@@ -342,6 +805,126 @@ class GoogleReviewsScraper:
             log.debug(f"Could not extract place name from page: {e}")
 
         return ""
+
+    @staticmethod
+    def _clean_title_place_name(title: str) -> str:
+        """Normalize a Google Maps title to a bare place name."""
+        value = (title or "").strip()
+        for suffix in (
+            " - Google Maps",
+            " - Google 地圖",
+            " - Google 地图",
+            " - Google マップ",
+            " - Google 지도",
+        ):
+            if value.endswith(suffix):
+                value = value[: -len(suffix)]
+                break
+        value = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', value).strip()
+        if value.lower() in {
+            "",
+            "google maps",
+            "google 地圖",
+            "google 地图",
+            "google マップ",
+            "google 지도",
+        }:
+            return ""
+        return value
+
+    @staticmethod
+    def _normalize_name_for_match(value: str) -> str:
+        """Loose normalization for matching target/place names across locales."""
+        cleaned = re.sub(r'[\u200e\u200f\u202a-\u202e]', '', (value or "")).lower().strip()
+        # Keep unicode letters/numbers; drop punctuation/spacing noise.
+        return re.sub(r"[\W_]+", "", cleaned, flags=re.UNICODE)
+
+    def _is_expected_place_context(
+        self,
+        driver: Chrome,
+        expected_place_name: str,
+        expected_query_place_id: str,
+    ) -> bool:
+        """
+        Validate current page looks like the intended target.
+        This prevents accidental acceptance of a different place page.
+        """
+        # If we have no expectation, we cannot validate strongly.
+        if not (expected_place_name or expected_query_place_id):
+            return True
+
+        expected_norm = self._normalize_name_for_match(expected_place_name)
+        title_name = ""
+        url_name = ""
+        current_url = ""
+
+        try:
+            current_url = driver.current_url or ""
+        except Exception:
+            current_url = ""
+
+        try:
+            title_name = self._clean_title_place_name(driver.title or "")
+        except Exception:
+            title_name = ""
+
+        try:
+            match = re.search(r"/maps/place/([^/@]+)", current_url)
+            if match:
+                url_name = urllib.parse.unquote(match.group(1))
+        except Exception:
+            url_name = ""
+
+        # Strong hint: expected query_place_id appears in URL/hrefs.
+        expected_qpid = (expected_query_place_id or "").strip()
+        qpid_match = False
+        if expected_qpid:
+            if expected_qpid in current_url:
+                qpid_match = True
+            else:
+                try:
+                    anchors = driver.find_elements(By.CSS_SELECTOR, 'a[href*="query_place_id="]')
+                except Exception:
+                    anchors = []
+                for anchor in anchors[:12]:
+                    try:
+                        href = (anchor.get_attribute("href") or "").strip()
+                    except Exception:
+                        href = ""
+                    if expected_qpid and expected_qpid in href:
+                        qpid_match = True
+                        break
+            if not qpid_match:
+                try:
+                    page_source = driver.page_source or ""
+                except Exception:
+                    page_source = ""
+                if expected_qpid and expected_qpid in page_source:
+                    qpid_match = True
+
+        # Name matching: compare expected name against URL/title-derived names.
+        name_match = False
+        if expected_norm:
+            candidates = [title_name, url_name]
+            for candidate in candidates:
+                candidate_norm = self._normalize_name_for_match(candidate)
+                if not candidate_norm:
+                    continue
+                if expected_norm in candidate_norm or candidate_norm in expected_norm:
+                    name_match = True
+                    break
+
+        # Accept when either strong query-place-id hint matches or place-name matches.
+        if qpid_match or name_match:
+            return True
+
+        log.warning(
+            "Resolved page does not match expected target (expected='%s', current_title='%s', current_url='%s')",
+            expected_place_name or expected_query_place_id or "-",
+            title_name,
+            current_url,
+        )
+        return False
 
     def _extract_place_coords(self, url: str) -> tuple:
         """Extract lat/lng coordinates from a Google Maps URL."""
@@ -353,6 +936,183 @@ class GoogleReviewsScraper:
             return match.group(1), match.group(2)
         return None, None
 
+    @staticmethod
+    def _extract_query_place_id(url: str) -> str:
+        """Extract query_place_id from a Google Maps URL when present."""
+        try:
+            parsed = urllib.parse.urlparse(url or "")
+            query = urllib.parse.parse_qs(parsed.query)
+            return ((query.get("query_place_id") or [""])[0] or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_generic_maps_title(title: str) -> bool:
+        """Return True when title is a generic Google Maps shell title."""
+        t = (title or "").strip().lower()
+        return t in {
+            "",
+            "google maps",
+            "google 地圖",
+            "google 地图",
+            "google マップ",
+            "google 지도",
+        }
+
+    def _extract_total_reviews_hint(self, driver: Chrome) -> int | None:
+        """
+        Best-effort parse of total review count shown on the place page.
+        Returns None when no reliable hint is found.
+        """
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text or ""
+        except Exception:
+            return None
+        text = " ".join(body_text.split())
+        if not text:
+            return None
+
+        patterns = [
+            r"(\d[\d,]*)\s*(?:reviews?|review)\b",
+            r"(\d[\d,]*)\s*(?:篇評論|則評論|評論|评论|條評論|条评论|条点评|條點評|件のレビュー|개의\s*리뷰)",
+            r"(?:reviews?|review|評論|评论|รีวิว|avis|reseñas|bewertungen|recensioni)\s*[:：]?\s*(\d[\d,]*)",
+        ]
+        candidates: List[int] = []
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                raw = (match.group(1) or "").replace(",", "").strip()
+                if not raw.isdigit():
+                    continue
+                count = int(raw)
+                if 0 <= count <= 1000000:
+                    candidates.append(count)
+        if not candidates:
+            return None
+        return max(candidates)
+
+    def _is_search_results_list_page(self, driver: Chrome) -> bool:
+        """Best-effort detection for search/list pages (not place detail pages)."""
+        try:
+            current_url = (driver.current_url or "").lower()
+        except Exception:
+            current_url = ""
+        url_looks_list = "/maps/search/" in current_url and "/maps/place/" not in current_url
+
+        body_text = ""
+        try:
+            body_text = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
+        except Exception:
+            pass
+        marker_hit = any(marker in body_text for marker in SEARCH_RESULTS_LIST_MARKERS)
+
+        has_review_surface = self._has_reviews_surface(driver)
+        return (url_looks_list or marker_hit) and not has_review_surface
+
+    def _open_search_result_from_list(
+        self,
+        driver: Chrome,
+        place_name: str,
+        query_place_id: str,
+    ) -> bool:
+        """
+        When Maps lands on a search-results list, click a result to open detail pane.
+        Returns True only when detail page signals are detected afterwards.
+        """
+        if not self._is_search_results_list_page(driver):
+            return False
+
+        selectors = [
+            "div.Nv2PK a.hfpxzc",
+            "a.hfpxzc",
+            'a[href*="/maps/place/"]',
+            'a[role="link"][href*="/maps/place/"]',
+        ]
+        candidates: List[WebElement] = []
+        for selector in selectors:
+            try:
+                found = driver.find_elements(By.CSS_SELECTOR, selector)
+                if found:
+                    candidates.extend(found)
+            except Exception:
+                continue
+
+        if not candidates:
+            return False
+
+        norm_name = (place_name or "").strip().lower()
+        best_score = -1
+        best: WebElement | None = None
+        for candidate in candidates:
+            try:
+                href = (candidate.get_attribute("href") or "").strip()
+                label = (
+                    candidate.get_attribute("aria-label")
+                    or candidate.get_attribute("title")
+                    or candidate.text
+                    or ""
+                ).strip()
+                score = 0
+                if href and "/maps/place/" in href:
+                    score += 1
+                if query_place_id and query_place_id in href:
+                    score += 5
+                if norm_name and norm_name in label.lower():
+                    score += 3
+                if score > best_score:
+                    best_score = score
+                    best = candidate
+            except Exception:
+                continue
+
+        if best is None:
+            return False
+
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', behavior:'instant'});",
+                best,
+            )
+            time.sleep(0.4)
+            try:
+                best.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", best)
+            time.sleep(2.5)
+            return self._looks_like_place_page(driver)
+        except Exception as e:
+            log.debug("Failed to open place from search list: %s", e)
+            return False
+
+    def _looks_like_place_page(self, driver: Chrome) -> bool:
+        """Best-effort check if current page is a place detail page (not list view)."""
+        if self._is_search_results_list_page(driver):
+            return False
+
+        has_review_surface = self._has_reviews_surface(driver)
+        if has_review_surface:
+            return True
+
+        try:
+            current_url = (driver.current_url or "").lower()
+        except Exception:
+            current_url = ""
+        if "/maps/place/" in current_url:
+            try:
+                title = (driver.title or "").strip()
+            except Exception:
+                title = ""
+            if not self._is_generic_maps_title(title):
+                return True
+
+        try:
+            tabs = driver.find_elements(By.CSS_SELECTOR, '[role="tab"]')
+            if any(self.is_reviews_tab(t) for t in tabs):
+                return True
+        except Exception:
+            pass
+
+        return False
+
     def navigate_to_place(self, driver: Chrome, url: str, wait: WebDriverWait) -> bool:
         """
         Navigate to a Google Maps place, bypassing the 'limited view' restriction
@@ -363,59 +1123,120 @@ class GoogleReviewsScraper:
         2. Use Google Maps search-based navigation (avoids limited view)
         3. Fall back to direct URL if search doesn't work
         """
-        log.info("Navigating to place with limited-view bypass...")
+        job_tag = f"[job:{self.job_id}]"
+        log.info("%s Navigating to place with limited-view bypass...", job_tag)
 
         # Step 1: Warm up - visit google.com first to establish session cookies
         try:
             driver.get("https://www.google.com")
             time.sleep(2)
             self.dismiss_cookies(driver)
-            log.info("Session warm-up completed")
+            if self.google_maps_auth_mode == "cookie":
+                self._inject_google_cookies(driver)
+            log.info("%s Session warm-up completed", job_tag)
         except Exception as e:
             log.debug(f"Warm-up navigation failed: {e}")
 
-        # Step 2: Resolve the target URL and extract place name
+        # Step 2: Resolve the target URL and extract place name / place_id hints
+        query_place_id = self._extract_query_place_id(url)
         place_name = self._extract_place_name(driver, url)
-        current_url = driver.current_url
+        try:
+            current_url = driver.current_url
+        except Exception:
+            current_url = url
 
-        # Step 3: Try search-based navigation (primary bypass method)
+        # Step 3: Prefer deterministic place_id navigation when available.
+        # Search-by-name is ambiguous and often lands on list pages.
+        if query_place_id:
+            place_id_urls = [
+                f"https://www.google.com/maps/place/?q=place_id:{query_place_id}",
+                f"https://www.google.com/maps/search/?api=1&query_place_id={query_place_id}",
+            ]
+            for idx, place_id_url in enumerate(place_id_urls, start=1):
+                log.info(
+                    "%s Trying query_place_id navigation (%d/%d): %s",
+                    job_tag,
+                    idx,
+                    len(place_id_urls),
+                    place_id_url,
+                )
+                try:
+                    driver.get(place_id_url)
+                    time.sleep(4)
+                    self.dismiss_cookies(driver)
+                    if self._looks_like_place_page(driver) and self._is_expected_place_context(
+                        driver,
+                        place_name,
+                        query_place_id,
+                    ):
+                        log.info("%s query_place_id navigation successful", job_tag)
+                        return True
+                    if (
+                        self._open_search_result_from_list(driver, place_name, query_place_id)
+                        and self._is_expected_place_context(driver, place_name, query_place_id)
+                    ):
+                        log.info("%s Opened target place from query_place_id search list", job_tag)
+                        return True
+                except Exception as e:
+                    log.debug("query_place_id navigation failed: %s", e)
+
+        # Step 4: Try search-based navigation (fallback method)
         if place_name:
             # Extract coordinates for more precise search
             lat, lng = self._extract_place_coords(current_url)
-            search_query = place_name
+            # Encode as a path segment to avoid breaking the URL with spaces/punctuation.
+            search_query = urllib.parse.quote(place_name, safe="")
             if lat and lng:
                 search_url = f"https://www.google.com/maps/search/{search_query}/@{lat},{lng},17z"
             else:
                 search_url = f"https://www.google.com/maps/search/{search_query}/"
 
-            log.info(f"Trying search-based navigation: {search_url}")
+            log.info("%s Trying search-based navigation: %s", job_tag, search_url)
             driver.get(search_url)
             time.sleep(5)
-
-            # Check if we landed on a place page with full content (tabs visible)
-            tabs = driver.find_elements(By.CSS_SELECTOR, '[role="tab"]')
-            has_reviews = any(
-                any(w in (t.text or "").lower() for w in REVIEW_WORDS)
-                or t.get_attribute("data-tab-index") == "1"
-                for t in tabs
+            limited_on_search = self._handle_limited_view(
+                driver, "search_navigation", place_name, strict=False
             )
-
-            if has_reviews:
-                log.info("Search-based navigation successful - full page with reviews tab loaded")
-                self.dismiss_cookies(driver)
+            if limited_on_search:
+                log.warning(
+                    "Search navigation landed in limited/list view, attempting direct URL fallback"
+                )
+            elif (
+                self._open_search_result_from_list(driver, place_name, query_place_id)
+                and self._is_expected_place_context(driver, place_name, query_place_id)
+            ):
+                log.info("%s Search results list resolved to place detail page", job_tag)
                 return True
+            else:
+                # Check if we landed on a place page with full content (tabs visible)
+                has_reviews = False
+                for tab in driver.find_elements(By.CSS_SELECTOR, '[role="tab"]'):
+                    try:
+                        tab_text = (tab.text or "").lower()
+                    except StaleElementReferenceException:
+                        continue
+                    if any(word in tab_text for word in REVIEW_WORDS) or self.is_reviews_tab(tab):
+                        has_reviews = True
+                        break
 
-            # Check for review cards directly (some layouts skip tabs)
-            cards = driver.find_elements(By.CSS_SELECTOR, 'div[data-review-id]')
-            if cards:
-                log.info(f"Search-based navigation found {len(cards)} review cards")
-                self.dismiss_cookies(driver)
-                return True
+                if has_reviews:
+                    if self._is_expected_place_context(driver, place_name, query_place_id):
+                        log.info("%s Search-based navigation successful - full page with reviews tab loaded", job_tag)
+                        self.dismiss_cookies(driver)
+                        return True
 
-            log.info("Search-based navigation did not show reviews, trying direct URL...")
+                # Check for review cards directly (some layouts skip tabs)
+                cards = driver.find_elements(By.CSS_SELECTOR, 'div[data-review-id]')
+                if cards:
+                    if self._is_expected_place_context(driver, place_name, query_place_id):
+                        log.info("%s Search-based navigation found %d review cards", job_tag, len(cards))
+                        self.dismiss_cookies(driver)
+                        return True
 
-        # Step 4: Fallback to direct URL
-        log.info(f"Navigating directly to: {url}")
+            log.info("%s Search-based navigation did not show reviews, trying direct URL...", job_tag)
+
+        # Step 5: Fallback to direct URL
+        log.info("%s Navigating directly to: %s", job_tag, url)
         driver.get(url)
         try:
             wait.until(lambda d: "google.com/maps" in d.current_url)
@@ -423,6 +1244,27 @@ class GoogleReviewsScraper:
             log.warning("Timed out waiting for Google Maps to load")
         time.sleep(3)
         self.dismiss_cookies(driver)
+        if self._looks_like_place_page(driver) and self._is_expected_place_context(
+            driver,
+            place_name,
+            query_place_id,
+        ):
+            return True
+        if (
+            self._open_search_result_from_list(driver, place_name, query_place_id)
+            and self._is_expected_place_context(driver, place_name, query_place_id)
+        ):
+            log.info("%s Direct navigation list resolved to place detail page", job_tag)
+            return True
+
+        limited_on_direct = self._handle_limited_view(
+            driver, "direct_navigation", place_name, strict=False
+        )
+        if limited_on_direct and self.google_maps_auth_mode == "cookie" and self.fail_on_limited_view:
+            raise LimitedViewError(
+                "Unable to open a full place page (query_place_id/search/direct URL all resolved to limited/list view). "
+                "Verify GOOGLE_MAPS_COOKIE_1PSID / GOOGLE_MAPS_COOKIE_1PSIDTS and target place metadata."
+            )
 
         # Check if limited view is active
         try:
@@ -432,7 +1274,10 @@ class GoogleReviewsScraper:
         except Exception:
             pass
 
-        return True
+        raise LimitedViewError(
+            "Unable to open a place detail page with reviews surface; Google Maps remained on "
+            "search/list view after query_place_id/search/direct navigation."
+        )
 
     def is_reviews_tab(self, tab: WebElement) -> bool:
         """
@@ -440,9 +1285,10 @@ class GoogleReviewsScraper:
         Uses multiple detection approaches for maximum reliability.
         """
         try:
-            # Strategy 1: Data attribute detection (most reliable across languages)
+            # Strategy 1: Data attribute detection (cross-language hint, but NOT sufficient alone)
+            # Note: In some locales/layouts, data-tab-index="1" may be the "Overview" tab, not "Reviews".
             tab_index = tab.get_attribute("data-tab-index")
-            if tab_index == "1" or tab_index == "reviews":
+            if tab_index == "reviews":
                 return True
 
             # Strategy 2: Role and aria attributes (accessibility detection)
@@ -466,6 +1312,13 @@ class GoogleReviewsScraper:
             for source in sources:
                 if any(word in source for word in REVIEW_WORDS):
                     return True
+
+            # data-tab-index="1" is treated as a weak hint only after keyword/URL checks above.
+            if tab_index == "1":
+                for attr in ["href", "data-href", "data-url", "data-target"]:
+                    attr_value = (tab.get_attribute(attr) or "").lower()
+                    if attr_value and ("review" in attr_value or "rating" in attr_value):
+                        return True
 
             # Strategy 4: Nested element detection
             try:
@@ -508,6 +1361,10 @@ class GoogleReviewsScraper:
         Highly dynamic reviews tab detection and clicking with multiple fallback strategies.
         Works across different languages, layouts, and browser environments.
         """
+        if self._has_active_reviews_surface(driver):
+            log.info("Reviews surface already present; skipping reviews tab click")
+            return True
+
         max_timeout = 25  # Maximum seconds to try
         end_time = time.time() + max_timeout
         attempts = 0
@@ -515,7 +1372,6 @@ class GoogleReviewsScraper:
         # Define different selectors to try in order of reliability
         tab_selectors = [
             # Direct tab selectors
-            '[data-tab-index="1"]',  # Most common tab index
             '[role="tab"][data-tab-index]',  # Any tab with index
             'button[role="tab"]',  # Button tabs
             'div[role="tab"]',  # Div tabs
@@ -524,10 +1380,9 @@ class GoogleReviewsScraper:
             # Common Google Maps review tab selectors
             '.fontTitleSmall[role="tab"]',  # Google Maps title font tabs
             '.hh2c6[role="tab"]',  # Common Google Maps class
-            '.m6QErb [role="tab"]',  # Maps container tabs
+            'div[role="tablist"] [role="tab"]',  # Tablist-scoped tabs
 
             # Text-based selectors for various languages
-            'button:contains("reviews")',  # Button containing "reviews"
             'div[role="tablist"] > *',  # Any tab in a tab list
             'div.m6QErb div[role="tablist"] > *',  # Google Maps specific tablist
         ]
@@ -661,20 +1516,212 @@ class GoogleReviewsScraper:
         log.warning(f"Failed to find/click reviews tab after {attempts} attempts")
         raise TimeoutException("Reviews tab not found or could not be clicked")
 
+    def _find_reviews_pane(self, driver: Chrome, wait: WebDriverWait) -> WebElement | None:
+        """
+        Find the actual scrollable reviews pane.
+
+        When Google renders review cards directly on the page, generic `div.m6QErb`
+        fallbacks often match unrelated side panels before the real reviews list.
+        Prefer anchoring off an actual review card's nearest `m6QErb` ancestor, then
+        validate fallback pane candidates by whether they contain review cards.
+        """
+        global_cards: List[WebElement] = []
+        for card in driver.find_elements(By.CSS_SELECTOR, CARD_SEL):
+            try:
+                if card.is_displayed():
+                    global_cards.append(card)
+            except StaleElementReferenceException:
+                continue
+            except Exception:
+                continue
+        if global_cards:
+            for card in global_cards[:3]:
+                try:
+                    anchored = driver.execute_script(
+                        """
+                        let node = arguments[0];
+                        while (node && node !== document.body) {
+                            if (
+                                node.tagName === 'DIV'
+                                && node.classList
+                                && node.classList.contains('m6QErb')
+                            ) {
+                                return node;
+                            }
+                            node = node.parentElement;
+                        }
+                        return null;
+                        """,
+                        card,
+                    )
+                    if anchored:
+                        log.info("Found reviews pane from review-card ancestor")
+                        return anchored
+                except Exception:
+                    continue
+
+        pane_selectors = [
+            PANE_SEL,
+            'div[role="main"] div.m6QErb.DxyBCb',
+            'div[role="main"] div.m6QErb',
+            'div.m6QErb.DxyBCb',
+            'div[role="main"]',
+        ]
+
+        global_card_count = len(global_cards)
+        for selector in pane_selectors:
+            try:
+                log.info(f"Trying to find reviews pane with selector: {selector}")
+                wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
+                candidates = driver.find_elements(By.CSS_SELECTOR, selector)
+            except TimeoutException:
+                log.debug(f"Pane not found with selector: {selector}")
+                continue
+
+            for candidate in candidates:
+                try:
+                    candidate_cards = self._count_displayed_matches(candidate, CARD_SEL)
+                except StaleElementReferenceException:
+                    continue
+                except Exception:
+                    candidate_cards = 0
+
+                if global_card_count > 0 and candidate_cards == 0 and selector != 'div[role="main"]':
+                    log.info(
+                        "Skipping pane candidate for selector %s: it contains 0 review cards while page has %d",
+                        selector,
+                        global_card_count,
+                    )
+                    continue
+
+                log.info(
+                    "Found reviews pane with selector: %s (cards in pane: %d)",
+                    selector,
+                    candidate_cards,
+                )
+                return candidate
+
+        return None
+
+    def _find_reviews_scroll_target(self, driver: Chrome, pane: WebElement) -> WebElement:
+        """
+        Find the element that actually owns the reviews scrollbar.
+
+        The review-pane ancestor can contain the cards while a nested div owns the
+        scroll position. When we bind to the wrong node, `scrollTop` stays at 0
+        and the scraper incorrectly concludes it is stuck.
+        """
+        visible_cards: List[WebElement] = []
+        try:
+            for card in pane.find_elements(By.CSS_SELECTOR, CARD_SEL):
+                try:
+                    if card.is_displayed():
+                        visible_cards.append(card)
+                except StaleElementReferenceException:
+                    continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        for card in visible_cards[:3]:
+            try:
+                scroll_target = driver.execute_script(
+                    """
+                    let node = arguments[0];
+                    while (node && node !== document.body) {
+                        const style = window.getComputedStyle(node);
+                        const overflowY = (style.overflowY || '').toLowerCase();
+                        if (
+                            node.scrollHeight > node.clientHeight + 40
+                            && ['auto', 'scroll', 'overlay'].includes(overflowY)
+                        ) {
+                            return node;
+                        }
+                        node = node.parentElement;
+                    }
+                    return null;
+                    """,
+                    card,
+                )
+                if scroll_target:
+                    log.info("Bound reviews scroll target from visible review-card ancestor")
+                    return scroll_target
+            except Exception:
+                continue
+
+        log.info("Falling back to reviews pane as scroll target")
+        return pane
+
+    @staticmethod
+    def _scroll_reviews_forward(
+        driver: Chrome,
+        scroll_target: WebElement,
+        last_card: WebElement | None = None,
+    ) -> None:
+        """Advance the reviews list using the scroll owner, with a stronger card-based fallback."""
+        moved = False
+        try:
+            before, after = driver.execute_script(
+                """
+                const node = arguments[0];
+                const start = node.scrollTop || 0;
+                const step = Math.max(400, Math.floor((node.clientHeight || 0) * 0.85));
+                node.scrollBy(0, step);
+                return [start, node.scrollTop || 0];
+                """,
+                scroll_target,
+            )
+            moved = after > before
+        except Exception:
+            moved = False
+
+        if not moved and last_card is not None:
+            try:
+                before, after = driver.execute_script(
+                    """
+                    const card = arguments[0];
+                    const node = arguments[1];
+                    const start = node ? (node.scrollTop || 0) : 0;
+
+                    card.scrollIntoView({block:'end', inline:'nearest'});
+                    if (node && node.scrollHeight > node.clientHeight + 40) {
+                        node.scrollTo(0, node.scrollHeight);
+                        node.dispatchEvent(
+                            new WheelEvent('wheel', {
+                                deltaY: Math.max(400, Math.floor((node.clientHeight || 0) * 0.85)),
+                                bubbles: true,
+                            })
+                        );
+                    }
+
+                    return [start, node ? (node.scrollTop || 0) : start];
+                    """,
+                    last_card,
+                    scroll_target,
+                )
+                moved = after > before
+            except Exception:
+                moved = False
+
+        if not moved:
+            try:
+                driver.execute_script("window.scrollBy(0, 500);")
+            except Exception:
+                pass
+
     def verify_reviews_tab_clicked(self, driver: Chrome) -> bool:
         """
         Verify that the reviews tab was successfully clicked by checking for
         characteristic elements that appear on the reviews page.
         """
         try:
-            # Common elements that appear when reviews tab is active
+            if self._has_active_reviews_surface(driver):
+                return True
+
+            # Common elements that appear when reviews tab is active.
+            # Avoid overly-generic containers that exist on non-review panes.
             verification_selectors = [
-                # Reviews container
-                'div.m6QErb.DxyBCb.kA9KIf.dS8AEf',
-
-                # Review cards
-                'div[data-review-id]',
-
                 # Sort button (usually appears with reviews)
                 'button[aria-label*="Sort" i]',
 
@@ -682,20 +1729,13 @@ class GoogleReviewsScraper:
                 'span[role="img"][aria-label*="star" i]',
 
                 # Other indicators
-                'div.m6QErb div.jftiEf',
                 '.HlvSq'
             ]
 
             # Check if any verification selector is present
             for selector in verification_selectors:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements and len(elements) > 0:
+                if self._count_displayed_matches(driver, selector, limit=1) > 0:
                     return True
-
-            # URL check - if "review" appears in the URL
-            if "review" in driver.current_url.lower():
-                return True
-
             return False
         except Exception as e:
             log.debug(f"Error verifying reviews tab click: {e}")
@@ -771,11 +1811,7 @@ class GoogleReviewsScraper:
                             # Check for common sort button classes
                             has_sort_class = "HQzyZ" in button_class or "sort" in button_class.lower()
                             
-                            # Check for aria attributes that indicate a dropdown
-                            has_dropdown_attrs = (element.get_attribute("aria-haspopup") == "true" or
-                                                element.get_attribute("aria-expanded") is not None)
-
-                            if has_sort_keyword or has_sort_class or has_dropdown_attrs:
+                            if has_sort_keyword or has_sort_class:
                                 # Found a potential sort button
                                 sort_button = element
                                 log.info(f"Found sort button with selector: {selector}")
@@ -790,27 +1826,6 @@ class GoogleReviewsScraper:
                 except Exception as e:
                     log.debug(f"Error with selector '{selector}': {e}")
                     continue
-
-            # If no button found with CSS selectors, try finding it from its container
-            if not sort_button:
-                try:
-                    # Look for the sort container by its distinctive classes
-                    containers = driver.find_elements(By.CSS_SELECTOR, 'div.m6QErb.Hk4XGb, div.XiKgde.tLjsW')
-                    for container in containers:
-                        try:
-                            # Find buttons within this container
-                            buttons = container.find_elements(By.TAG_NAME, 'button')
-                            for button in buttons:
-                                if button.is_displayed() and button.is_enabled():
-                                    sort_button = button
-                                    log.info("Found sort button through container element")
-                                    break
-                        except:
-                            continue
-                        if sort_button:
-                            break
-                except Exception as e:
-                    log.debug(f"Error finding button via container: {e}")
 
             # If still no button found, try XPath approach with keywords
             if not sort_button:
@@ -831,32 +1846,6 @@ class GoogleReviewsScraper:
                             break
                     except:
                         continue
-            
-            # Final fallback: look for any button in the reviews area that might open a dropdown
-            if not sort_button:
-                try:
-                    # Look specifically in the reviews container area
-                    reviews_container = driver.find_elements(By.CSS_SELECTOR, 'div.m6QErb, div.DxyBCb')
-                    for container in reviews_container:
-                        try:
-                            # Find all buttons in this container
-                            buttons = container.find_elements(By.TAG_NAME, 'button')
-                            for button in buttons:
-                                try:
-                                    if (button.is_displayed() and button.is_enabled() and
-                                        (button.get_attribute("aria-haspopup") == "true" or
-                                         "dropdown" in (button.get_attribute("class") or "").lower())):
-                                        sort_button = button
-                                        log.info("Found potential sort button via fallback dropdown detection")
-                                        break
-                                except:
-                                    continue
-                            if sort_button:
-                                break
-                        except:
-                            continue
-                except Exception as e:
-                    log.debug(f"Error in fallback sort button detection: {e}")
 
             # Final check - do we have a sort button?
             if not sort_button:
@@ -1247,6 +2236,9 @@ class GoogleReviewsScraper:
     def scrape(self):
         """Main scraper method"""
         start_time = time.time()
+        self.last_error_message = ""
+        self.last_error_transient = False
+        job_tag = f"[job:{self.job_id}]"
 
         url = self.config.get("url")
         headless = self.config.get("headless", True)
@@ -1256,8 +2248,8 @@ class GoogleReviewsScraper:
         max_scroll_attempts = self.config.get("max_scroll_attempts", 50)
         scroll_idle_limit = self.config.get("scroll_idle_limit", 15)
 
-        log.info(f"Starting scraper with settings: headless={headless}, sort_by={sort_by}")
-        log.info(f"URL: {url}")
+        log.info("%s Starting scraper with settings: headless=%s, sort_by=%s", job_tag, headless, sort_by)
+        log.info("%s URL: %s", job_tag, url)
 
         place_id = None
         session_id = None
@@ -1274,12 +2266,11 @@ class GoogleReviewsScraper:
 
             # Extract place ID and register in database
             resolved_url = driver.current_url
-            place_name = ""
-            try:
-                title = driver.title or ""
-                place_name = title.replace(" - Google Maps", "").strip()
-            except Exception:
-                pass
+            place_name = self._extract_place_name(driver, resolved_url)
+            if not place_name:
+                place_name = str(
+                    ((self.config.get("custom_params", {}) or {}).get("company", ""))
+                ).strip()
             place_id = extract_place_id(url, resolved_url)
             lat, lng = self._extract_place_coords(resolved_url)
             lat_f = float(lat) if lat else None
@@ -1288,20 +2279,59 @@ class GoogleReviewsScraper:
                 place_id, place_name, url, resolved_url, lat_f, lng_f
             )
             session_id = self.review_db.start_session(place_id, sort_by)
-            log.info(f"Registered place: {place_id} ({place_name})")
+            log.info("%s Registered place: %s (%s)", job_tag, place_id, place_name)
 
             # Load seen IDs from DB (empty for full mode to re-process everything)
             if self.scrape_mode == "full":
                 seen = set()
             else:
                 seen = self.review_db.get_review_ids(place_id)
+            existing_seen_count = len(seen)
+            initial_seen_ids = set(seen)
+            log.info("%s Existing reviews loaded from DB: %d", job_tag, existing_seen_count)
+
+            seen_fingerprints: Dict[str, str] = {}
+            duplicate_existing_count = 0
+            if self.scrape_mode != "full":
+                for existing_review in self.review_db.get_reviews(place_id):
+                    fingerprint = self._review_fingerprint(
+                        author=existing_review.get("author", ""),
+                        rating=existing_review.get("rating", 0.0),
+                        text=existing_review.get("review_text", {}),
+                        review_date=existing_review.get("review_date", ""),
+                        raw_date=existing_review.get("raw_date", ""),
+                        profile=existing_review.get("profile_url", ""),
+                    )
+                    if not fingerprint:
+                        continue
+                    existing_review_id = str(existing_review.get("review_id", "")).strip()
+                    if not existing_review_id:
+                        continue
+                    if fingerprint in seen_fingerprints and seen_fingerprints[fingerprint] != existing_review_id:
+                        duplicate_existing_count += 1
+                        continue
+                    seen_fingerprints[fingerprint] = existing_review_id
+
+            logical_existing_count = len(seen_fingerprints) if seen_fingerprints else existing_seen_count
+            if duplicate_existing_count:
+                log.warning(
+                    "%s Found %d duplicate stored reviews by fingerprint; using logical unique count %d",
+                    job_tag,
+                    duplicate_existing_count,
+                    logical_existing_count,
+                )
 
             self.dismiss_cookies(driver)
             self.click_reviews_tab(driver)
 
-            # Extra wait after clicking reviews tab to ensure page loads
+            # Wait for review cards to appear instead of fixed sleep
             log.info("Waiting for reviews page to fully load...")
-            time.sleep(3)
+            try:
+                WebDriverWait(driver, 5, poll_frequency=0.3).until(
+                    lambda d: len(d.find_elements(By.CSS_SELECTOR, "div[data-review-id], div.jftiEf")) > 0
+                )
+            except Exception:
+                time.sleep(1)  # Fallback short sleep if no cards found yet
 
             # Wait for page to be fully interactive
             try:
@@ -1320,96 +2350,230 @@ class GoogleReviewsScraper:
                 sort_ok = bool(self.set_sort(driver, sort_by))
             except Exception as sort_error:
                 log.warning(f"Sort failed but continuing: {sort_error}")
+            sort_confirmed_newest = sort_ok and sort_by == "newest"
 
             # Early-stop only makes sense when reviews are sorted by newest.
             # If sort failed or sort_by isn't "newest", disable it.
-            if stop_threshold > 0 and (not sort_ok or sort_by != "newest"):
+            if stop_threshold > 0 and (not sort_confirmed_newest):
                 log.warning(
                     "Disabling early stop (stop_threshold=%d) — "
                     "reviews are not confirmed sorted by newest",
                     stop_threshold,
                 )
                 stop_threshold = 0
+            elif (
+                stop_threshold > 0
+                and max_reviews > 0
+                and existing_seen_count < max_reviews
+            ):
+                log.info(
+                    "Disabling early stop (stop_threshold=%d) for backfill: "
+                    "existing reviews (%d) are below target max_reviews (%d).",
+                    stop_threshold,
+                    existing_seen_count,
+                    max_reviews,
+                )
+                stop_threshold = 0
 
-            # Add a longer wait after setting sort to allow results to load
+            # Wait for reviews to re-render after sort change
             log.info("Waiting for reviews to render...")
-            time.sleep(3)
+            try:
+                WebDriverWait(driver, 5, poll_frequency=0.3).until(
+                    lambda d: len(d.find_elements(By.CSS_SELECTOR, "div[data-review-id], div.jftiEf")) > 0
+                )
+            except Exception:
+                time.sleep(1)  # Fallback short sleep
+
+            # Lightweight diagnostics: helps when Google changes markup.
+            try:
+                log.info("Post-click URL: %s", driver.current_url)
+                log.info("Post-click title: %s", driver.title or "")
+                try:
+                    body = driver.find_element(By.TAG_NAME, "body").text or ""
+                    snippet = " ".join(body.split())[:400]
+                    if snippet:
+                        log.info("Post-click body snippet: %s", snippet)
+                except Exception:
+                    pass
+                n_data = len(driver.find_elements(By.CSS_SELECTOR, 'div[data-review-id]'))
+                n_jfti = len(driver.find_elements(By.CSS_SELECTOR, 'div.jftiEf'))
+                log.info("Review element counts after navigation: data-review-id=%d jftiEf=%d", n_data, n_jfti)
+            except Exception:
+                pass
+
+            if not self._has_reviews_surface(driver):
+                details = {
+                    "reason": "review_surface_not_detected",
+                    "counts": self._collect_review_surface_counts(driver),
+                }
+                self._write_debug_artifacts(
+                    driver,
+                    place_name or place_id or "place",
+                    "review_surface_missing",
+                    details,
+                )
+                log.warning(
+                    "Review surface not detected by the quick probe; continuing to pane lookup."
+                )
+
+            total_reviews_hint = self._extract_total_reviews_hint(driver)
+            if total_reviews_hint is not None:
+                log.info("%s Page total reviews hint: %d", job_tag, total_reviews_hint)
+                if logical_existing_count > total_reviews_hint:
+                    log.warning(
+                        "%s DB has %d active reviews but Google currently reports %d; "
+                        "will reconcile stale rows only after a confirmed full pass",
+                        job_tag,
+                        logical_existing_count,
+                        total_reviews_hint,
+                    )
 
             # Use try-except to handle cases where the pane is not found
-            # Try multiple selectors for the reviews pane
-            pane = None
-            pane_selectors = [
-                PANE_SEL,  # Primary selector
-                'div[role="main"] div.m6QErb',  # Simplified version
-                'div.m6QErb.DxyBCb',  # Even more simplified
-                'div[role="main"]'  # Most generic
-            ]
-
-            for selector in pane_selectors:
-                try:
-                    log.info(f"Trying to find reviews pane with selector: {selector}")
-                    pane = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                    if pane:
-                        log.info(f"Found reviews pane with selector: {selector}")
-                        break
-                except TimeoutException:
-                    log.debug(f"Pane not found with selector: {selector}")
-                    continue
+            pane = self._find_reviews_pane(driver, wait)
 
             if not pane:
                 log.warning("Could not find reviews pane with any selector. Page structure might have changed.")
+                self._write_debug_artifacts(
+                    driver,
+                    place_name or place_id or "place",
+                    "reviews_pane_missing",
+                    {"reason": "reviews_pane_not_found"},
+                )
+                self.last_error_message = "Could not find reviews pane with any selector."
+                self.last_error_transient = False
                 return False
 
             progress = Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]{task.description}"),
                 BarColumn(),
-                MofNCompleteColumn(),
+                TextColumn("[cyan]{task.completed} reviews"),
                 transient=False,
             )
             progress.start()
-            task_id = progress.add_task("Scraped", total=None, completed=len(seen))
+            displayed_review_count = logical_existing_count
+            task_id = progress.add_task("Scraped", completed=displayed_review_count)
             idle = 0
             processed_ids = set()
+            processed_fingerprints = set()
+            current_session_ids: set[str] = set()
+            session_new_ids: set[str] = set()
             consecutive_matched_batches = 0
+            hit_max_reviews = False
 
             # Prefetch selector to avoid repeated lookups
             try:
-                driver.execute_script("window.scrollablePane = arguments[0];", pane)
-                scroll_script = "window.scrollablePane.scrollBy(0, window.scrollablePane.scrollHeight);"
+                scroll_target = self._find_reviews_scroll_target(driver, pane)
+                driver.execute_script("window.scrollablePane = arguments[0];", scroll_target)
             except Exception as e:
                 log.warning(f"Error setting up scroll script: {e}")
-                scroll_script = "window.scrollBy(0, 300);"  # Fallback to simple scrolling
+                scroll_target = pane
 
             max_attempts = max_scroll_attempts
             attempts = 0
             max_idle = scroll_idle_limit
+            if not sort_confirmed_newest and max_idle > 12:
+                log.warning(
+                    "%s Sort newest is not confirmed; reducing idle limit from %d to %d to avoid long no-op scrolling",
+                    job_tag,
+                    max_idle,
+                    12,
+                )
+                max_idle = 12
+            # In update mode, if we never discover a single new review for a while,
+            # stop earlier to avoid long "looks stuck" runs.
+            zero_new_idle_limit = min(max_idle, 12)
+            if (
+                self.scrape_mode == "update"
+                and total_reviews_hint is not None
+                and len(seen) >= total_reviews_hint
+                and zero_new_idle_limit > 6
+            ):
+                log.info(
+                    "%s Existing reviews (%d) already meet page hint (%d); reducing zero-new idle limit to %d",
+                    job_tag,
+                    len(seen),
+                    total_reviews_hint,
+                    6,
+                )
+                zero_new_idle_limit = 6
             consecutive_no_cards = 0  # Track how many times we find zero cards
             last_scroll_position = 0
             scroll_stuck_count = 0
+            end_confirmation_scrolls_remaining = -1
+
+            def _fallback_review_id(raw: RawReview) -> str:
+                # Stable-ish ID when Google doesn't expose data-review-id.
+                base = "|".join([
+                    (raw.author or "").strip(),
+                    (raw.review_date or raw.date or "").strip(),
+                    f"{raw.rating:.1f}",
+                    (raw.text or "").strip(),
+                    (raw.profile or "").strip(),
+                ])
+                h = hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                return f"fallback:{h}"
+
+            def _is_dead_session_error(exc: Exception) -> bool:
+                msg = str(exc).lower()
+                return (
+                    isinstance(exc, (InvalidSessionIdException, NoSuchWindowException))
+                    or "invalid session id" in msg
+                    or "no such window" in msg
+                    or "web view not found" in msg
+                )
+
+            def _consume_end_confirmation(reason: str) -> bool:
+                nonlocal end_confirmation_scrolls_remaining
+                if end_confirmation_scrolls_remaining < 0:
+                    end_confirmation_scrolls_remaining = 3
+                    log.warning(
+                        "%s %s; running %d confirmation scroll attempts before stopping",
+                        job_tag,
+                        reason,
+                        end_confirmation_scrolls_remaining,
+                    )
+                if end_confirmation_scrolls_remaining == 0:
+                    return False
+                attempt_number = 4 - end_confirmation_scrolls_remaining
+                log.info("%s Confirmation scroll attempt %d/3", job_tag, attempt_number)
+                end_confirmation_scrolls_remaining -= 1
+                return True
 
             while attempts < max_attempts:
                 if self.cancel_event.is_set():
                     log.info("Scrape cancelled by user request")
                     raise InterruptedError("Scrape cancelled")
+                if hit_max_reviews:
+                    break
 
                 try:
                     cards = pane.find_elements(By.CSS_SELECTOR, CARD_SEL)
-                    fresh_cards: List[WebElement] = []
 
                     # Check for valid cards
                     if len(cards) == 0:
                         consecutive_no_cards += 1
-                        log.info(f"No review cards found in this iteration (consecutive: {consecutive_no_cards})")
+                        log.info(
+                            "%s No review cards found in this iteration (consecutive: %d)",
+                            job_tag,
+                            consecutive_no_cards,
+                        )
 
                         # If we keep finding no cards, might have hit the end
                         if consecutive_no_cards > 5:
-                            log.warning("No cards found for 5+ iterations - might be at end of reviews")
+                            if _consume_end_confirmation("No cards found for 5+ iterations - might be at end of reviews"):
+                                attempts += 1
+                                self._scroll_reviews_forward(driver, scroll_target)
+                                time.sleep(1)
+                                driver.execute_script("window.scrollBy(0, 1000);")
+                                time.sleep(1.5)
+                                continue
+                            log.warning("%s No cards found after confirmation scrolls - stopping", job_tag)
                             break
 
                         attempts += 1
                         # Try aggressive scrolling
-                        driver.execute_script(scroll_script)
+                        self._scroll_reviews_forward(driver, scroll_target)
                         time.sleep(1)
                         driver.execute_script("window.scrollBy(0, 1000);")  # Extra scroll
                         time.sleep(1.5)
@@ -1418,39 +2582,54 @@ class GoogleReviewsScraper:
                         consecutive_no_cards = 0  # Reset counter when we find cards
 
                     batch_seen_count = 0  # Cards already in DB (for batch stop)
-                    for c in cards:
+                    fresh_raws: List[Tuple[RawReview, str]] = []
+
+                    for card in cards:
                         try:
-                            cid = c.get_attribute("data-review-id")
-                            if not cid or cid in processed_ids:
+                            raw = RawReview.from_card(card)
+                            fingerprint = self._review_fingerprint(
+                                author=raw.author,
+                                rating=raw.rating,
+                                text=raw.text,
+                                review_date=raw.review_date,
+                                raw_date=raw.date,
+                                profile=raw.profile,
+                            )
+
+                            if fingerprint:
+                                if fingerprint in processed_fingerprints:
+                                    continue
+                                processed_fingerprints.add(fingerprint)
+
+                            if not raw.id:
+                                raw.id = _fallback_review_id(raw)
+                            if raw.id.startswith("fallback:") and fingerprint and fingerprint in seen_fingerprints:
+                                raw.id = seen_fingerprints[fingerprint]
+                            if raw.id:
+                                current_session_ids.add(raw.id)
+
+                            if raw.id in processed_ids:
                                 continue
-                            processed_ids.add(cid)
-                            if cid in seen:
+                            processed_ids.add(raw.id)
+
+                            if raw.id in seen:
                                 batch_seen_count += 1
-                                continue
-                            fresh_cards.append(c)
+                            else:
+                                fresh_raws.append((raw, fingerprint))
+
                         except StaleElementReferenceException:
                             continue
                         except Exception as e:
-                            log.debug(f"Error getting review ID: {e}")
+                            if _is_dead_session_error(e):
+                                raise
+                            log.warning("parse error - skipping card\n%s",
+                                        traceback.format_exc(limit=1).strip())
                             continue
 
-                    batch_total = len(fresh_cards) + batch_seen_count
+                    batch_total = len(fresh_raws) + batch_seen_count
                     batch_unchanged = batch_seen_count
 
-                    for card in fresh_cards:
-                        try:
-                            raw = RawReview.from_card(card)
-                        except StaleElementReferenceException:
-                            continue
-                        except Exception:
-                            log.warning("parse error - storing stub\n%s",
-                                        traceback.format_exc(limit=1).strip())
-                            try:
-                                raw_id = card.get_attribute("data-review-id") or ""
-                                raw = RawReview(id=raw_id, text="", lang="und")
-                            except StaleElementReferenceException:
-                                continue
-
+                    for raw, fingerprint in fresh_raws:
                         review_dict = {
                             "review_id": raw.id,
                             "text": raw.text,
@@ -1475,14 +2654,36 @@ class GoogleReviewsScraper:
                         if result == "unchanged":
                             batch_unchanged += 1
                         seen.add(raw.id)
-                        progress.advance(task_id)
+                        if fingerprint:
+                            seen_fingerprints.setdefault(fingerprint, raw.id)
+                        if raw.id not in initial_seen_ids:
+                            session_new_ids.add(raw.id)
+                        displayed_review_count = logical_existing_count + len(session_new_ids)
+                        progress.update(task_id, completed=displayed_review_count)
                         idle = 0
                         attempts = 0
-
-                        if max_reviews > 0 and len(seen) >= max_reviews:
-                            log.info("Reached max_reviews limit (%d), stopping.", max_reviews)
-                            idle = 999
+                        end_confirmation_scrolls_remaining = -1
+                        if max_reviews > 0 and len(session_new_ids) >= max_reviews:
+                            log.info(
+                                "Reached max_reviews limit (%d) for newly captured reviews in current scrape session, stopping.",
+                                max_reviews,
+                            )
+                            hit_max_reviews = True
                             break
+                    if hit_max_reviews:
+                        break
+
+                    if fresh_raws:
+                        processed_total = logical_existing_count + len(session_new_ids)
+                        log.info(
+                            "%s Scraped %d reviews so far (new=%d, updated=%d, restored=%d, unchanged=%d)",
+                            job_tag,
+                            processed_total,
+                            batch_stats["new"],
+                            batch_stats["updated"],
+                            batch_stats["restored"],
+                            batch_stats["unchanged"],
+                        )
 
                     # Batch-level stop: entire scroll iteration was unchanged.
                     # Require min 3 reviews in the batch to avoid false stops
@@ -1490,52 +2691,143 @@ class GoogleReviewsScraper:
                     if stop_threshold > 0 and batch_total >= 3:
                         if batch_unchanged == batch_total:
                             consecutive_matched_batches += 1
-                            log.info("Fully matched batch %d/%d (%d reviews)",
-                                     consecutive_matched_batches, stop_threshold, batch_total)
+                            log.info(
+                                "%s Fully matched batch %d/%d (%d reviews)",
+                                job_tag,
+                                consecutive_matched_batches,
+                                stop_threshold,
+                                batch_total,
+                            )
                             if consecutive_matched_batches >= stop_threshold:
-                                log.info("Stopping: %d consecutive fully-matched batches",
-                                         stop_threshold)
+                                log.info(
+                                    "%s Stopping: %d consecutive fully-matched batches",
+                                    job_tag,
+                                    stop_threshold,
+                                )
                                 idle = 999
                         else:
                             consecutive_matched_batches = 0
 
-                    if idle >= max_idle:
-                        log.info(f"Stopping: No new reviews found after {max_idle} scroll attempts")
+                    if hit_max_reviews:
                         break
 
-                    if not fresh_cards:
+                    if idle >= max_idle:
+                        if _consume_end_confirmation(f"No new reviews found after {max_idle} scroll attempts"):
+                            attempts += 1
+                            try:
+                                self._scroll_reviews_forward(
+                                    driver,
+                                    scroll_target,
+                                    cards[-1] if cards else None,
+                                )
+                                time.sleep(0.5)
+                                driver.execute_script("window.scrollBy(0, 500);")
+                                time.sleep(1.0)
+                            except Exception as e:
+                                log.warning(f"Error scrolling during confirmation pass: {e}")
+                            continue
+                        log.info(
+                            "%s Stopping: No new reviews found after %d scroll attempts plus confirmation scrolls",
+                            job_tag,
+                            max_idle,
+                        )
+                        break
+
+                    if not fresh_raws:
                         idle += 1
                         attempts += 1
-                        log.info(f"No new reviews in this iteration (idle: {idle}/{max_idle}, attempts: {attempts}/{max_attempts}, total seen: {len(seen)})")
+                        log.info(
+                            "%s No new reviews in this iteration (idle: %d/%d, attempts: %d/%d, total seen: %d)",
+                            job_tag,
+                            idle,
+                            max_idle,
+                            attempts,
+                            max_attempts,
+                            len(seen),
+                        )
+                        if (
+                            self.scrape_mode == "update"
+                            and not session_new_ids
+                            and idle >= zero_new_idle_limit
+                        ):
+                            log.info(
+                                "%s Stopping early: still 0 new reviews after %d idle attempts in update mode",
+                                job_tag,
+                                zero_new_idle_limit,
+                            )
+                            break
+                        if (
+                            self.scrape_mode == "update"
+                            and not session_new_ids
+                            and total_reviews_hint is not None
+                            and len(seen) >= total_reviews_hint
+                            and idle >= 4
+                        ):
+                            log.info(
+                                "%s Stopping early: DB already has %d reviews and page hint is %d (idle: %d)",
+                                job_tag,
+                                len(seen),
+                                total_reviews_hint,
+                                idle,
+                            )
+                            break
 
                         # When no new reviews, scroll more aggressively
                         try:
                             # Try multiple scroll methods
-                            driver.execute_script(scroll_script)
-                            time.sleep(0.5)
+                            self._scroll_reviews_forward(
+                                driver,
+                                scroll_target,
+                                cards[-1] if cards else None,
+                            )
+                            time.sleep(0.3)
                             driver.execute_script("window.scrollBy(0, 500);")  # Extra scroll
-                            time.sleep(0.5)
+                            time.sleep(0.3)
                         except Exception as e:
                             log.warning(f"Error scrolling: {e}")
                     else:
-                        log.info(f"Found {len(fresh_cards)} new reviews in this iteration")
+                        log.info("%s Found %d new reviews in this iteration", job_tag, len(fresh_raws))
+                        end_confirmation_scrolls_remaining = -1
 
                     # Check if we're actually scrolling or stuck
                     try:
-                        current_scroll = driver.execute_script("return arguments[0].scrollTop;", pane)
-                        if current_scroll == last_scroll_position and len(fresh_cards) == 0:
+                        current_scroll = driver.execute_script("return arguments[0].scrollTop;", scroll_target)
+                        if current_scroll == last_scroll_position and len(fresh_raws) == 0:
                             scroll_stuck_count += 1
-                            log.warning(f"Scroll position hasn't changed (stuck at {current_scroll}px, stuck count: {scroll_stuck_count})")
+                            log.warning(
+                                "%s Scroll position hasn't changed (stuck at %spx, stuck count: %d)",
+                                job_tag,
+                                current_scroll,
+                                scroll_stuck_count,
+                            )
 
                             if scroll_stuck_count > 5:
-                                log.warning("Scroll is stuck - trying alternative scroll method")
+                                log.warning("%s Scroll is stuck - trying alternative scroll method", job_tag)
                                 # Try clicking the last visible review to force loading
                                 try:
-                                    driver.execute_script("arguments[0].lastElementChild.scrollIntoView();", pane)
-                                    time.sleep(2)
+                                    if cards:
+                                        driver.execute_script(
+                                            "arguments[0].scrollIntoView({block:'end', inline:'nearest'});",
+                                            cards[-1],
+                                        )
+                                    else:
+                                        driver.execute_script("arguments[0].lastElementChild.scrollIntoView();", scroll_target)
+                                    time.sleep(1)
                                 except:
                                     pass
                                 scroll_stuck_count = 0
+                            if (
+                                self.scrape_mode == "update"
+                                and not session_new_ids
+                                and idle >= 4
+                                and scroll_stuck_count >= 4
+                            ):
+                                log.info(
+                                    "%s Stopping early: scroll remained stuck (%d iterations) with 0 new reviews",
+                                    job_tag,
+                                    scroll_stuck_count,
+                                )
+                                break
                         else:
                             scroll_stuck_count = 0
                             last_scroll_position = current_scroll
@@ -1544,36 +2836,116 @@ class GoogleReviewsScraper:
 
                     # Use JavaScript for smoother scrolling
                     try:
-                        driver.execute_script(scroll_script)
+                        self._scroll_reviews_forward(
+                            driver,
+                            scroll_target,
+                            cards[-1] if cards else None,
+                        )
                     except Exception as e:
                         log.warning(f"Error scrolling: {e}")
                         # Try a simpler scroll method
                         driver.execute_script("window.scrollBy(0, 300);")
 
-                    # Dynamic sleep: sleep less when processing many reviews, more when finding none
-                    if len(fresh_cards) > 5:
-                        sleep_time = 0.7
-                    elif len(fresh_cards) == 0:
-                        sleep_time = 2.0  # Wait longer when finding nothing (let page load)
+                    # Smart wait: instead of fixed sleep, wait for new cards to appear in the DOM.
+                    # Falls back to a max timeout if nothing loads (same end behavior, faster on avg).
+                    prev_card_count = len(cards)
+                    if len(fresh_raws) > 5:
+                        max_wait = 0.7
+                    elif len(fresh_raws) == 0:
+                        max_wait = 1.5
                     else:
-                        sleep_time = 1.0
-                    time.sleep(sleep_time)
+                        max_wait = 0.8
+                    try:
+                        WebDriverWait(driver, max_wait, poll_frequency=0.15).until(
+                            lambda d: len(scroll_target.find_elements(By.CSS_SELECTOR, CARD_SEL)) > prev_card_count
+                        )
+                    except Exception:
+                        pass  # Timeout is fine — just means no new cards yet
 
                 except StaleElementReferenceException:
                     # The pane or other element went stale, try to re-find
                     log.debug("Stale element encountered, re-finding elements")
                     try:
-                        pane = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, PANE_SEL)))
-                        driver.execute_script("window.scrollablePane = arguments[0];", pane)
+                        pane = self._find_reviews_pane(driver, wait)
+                        if not pane:
+                            raise TimeoutException("Reviews pane not found")
+                        scroll_target = self._find_reviews_scroll_target(driver, pane)
+                        driver.execute_script("window.scrollablePane = arguments[0];", scroll_target)
                     except Exception:
                         log.warning("Could not re-find reviews pane after stale element")
                         break
                 except Exception as e:
+                    if _is_dead_session_error(e):
+                        log.error("Browser session died during review loop: %s", e)
+                        raise
                     log.warning(f"Error during review processing: {e}")
                     attempts += 1
                     time.sleep(1)
 
             progress.stop()
+
+            if (
+                session_id
+                and not hit_max_reviews
+                and total_reviews_hint is not None
+                and logical_existing_count > total_reviews_hint
+            ):
+                reconcile_reasons: List[str] = []
+                try:
+                    if not self._has_active_reviews_surface(driver):
+                        reconcile_reasons.append("reviews surface not active")
+                except Exception:
+                    reconcile_reasons.append("unable to verify reviews surface")
+
+                try:
+                    scroll_ok = bool(
+                        driver.execute_script(
+                            "return arguments[0] && (arguments[0].scrollHeight > arguments[0].clientHeight + 40);",
+                            scroll_target,
+                        )
+                    )
+                    if not scroll_ok:
+                        reconcile_reasons.append("scroll target not scrollable")
+                except Exception:
+                    reconcile_reasons.append("unable to verify scroll target")
+
+                try:
+                    limited_now, _ = self._is_limited_view(driver, stage="pre_reconcile")
+                    if limited_now:
+                        reconcile_reasons.append("limited view detected")
+                except Exception:
+                    reconcile_reasons.append("unable to verify limited-view state")
+
+                try:
+                    place_conflicts = [
+                        c
+                        for c in self.review_db.get_cross_place_conflicts(include_hash_only=False)
+                        if place_id in set(c.get("place_ids", []))
+                    ]
+                    if place_conflicts:
+                        reconcile_reasons.append("unresolved cross-place review_id conflicts")
+                except Exception:
+                    reconcile_reasons.append("unable to verify cross-place conflicts")
+
+                if len(current_session_ids) >= total_reviews_hint and not reconcile_reasons:
+                    stale_count = self.review_db.mark_stale(place_id, session_id, current_session_ids)
+                    if stale_count:
+                        self.review_db.refresh_place_total_reviews(place_id)
+                        log.warning(
+                            "%s Reconciled %d stale reviews after full pass (DB had %d active, page hint %d)",
+                            job_tag,
+                            stale_count,
+                            logical_existing_count,
+                            total_reviews_hint,
+                        )
+                else:
+                    log.warning(
+                        "%s Skipping stale-review reconciliation: saw=%d hint=%d reasons=%s",
+                        job_tag,
+                        len(current_session_ids),
+                        total_reviews_hint,
+                        ", ".join(reconcile_reasons) if reconcile_reasons else "insufficient visible reviews",
+                    )
 
             # End session with stats
             total_found = sum(batch_stats.values())
@@ -1586,6 +2958,7 @@ class GoogleReviewsScraper:
                         batch_stats.get("updated", 0)
                         + batch_stats.get("restored", 0)
                     ),
+                    reached_end=(not hit_max_reviews),
                 )
 
             # Post-scrape pipeline: process once, write to all targets
@@ -1613,10 +2986,57 @@ class GoogleReviewsScraper:
 
             return True
 
-        except Exception as e:
+        except InterruptedError as e:
+            message = str(e) or "Scrape cancelled"
+            self.last_error_message = message
+            self.last_error_transient = False
+            if session_id:
+                total_found = sum(batch_stats.values())
+                self.review_db.end_session(
+                    session_id,
+                    "cancelled",
+                    reviews_found=total_found,
+                    reviews_new=batch_stats.get("new", 0),
+                    reviews_updated=(
+                        batch_stats.get("updated", 0)
+                        + batch_stats.get("restored", 0)
+                    ),
+                    error=message,
+                )
+            log.info("%s %s", job_tag, message)
+            return False
+        except KeyboardInterrupt:
+            message = "Scrape interrupted by user"
+            self.last_error_message = message
+            self.last_error_transient = False
+            if session_id:
+                total_found = sum(batch_stats.values())
+                self.review_db.end_session(
+                    session_id,
+                    "cancelled",
+                    reviews_found=total_found,
+                    reviews_new=batch_stats.get("new", 0),
+                    reviews_updated=(
+                        batch_stats.get("updated", 0)
+                        + batch_stats.get("restored", 0)
+                    ),
+                    error=message,
+                )
+            log.info("%s %s", job_tag, message)
+            return False
+        except LimitedViewError as e:
+            self.last_error_message = str(e)
+            self.last_error_transient = False
             if session_id:
                 self.review_db.end_session(session_id, "failed", error=str(e))
-            log.error(f"Error during scraping: {e}")
+            log.error("%s Limited view fail-fast: %s", job_tag, e)
+            return False
+        except Exception as e:
+            self.last_error_message = str(e)
+            self.last_error_transient = _is_transient_browser_error(self.last_error_message)
+            if session_id:
+                self.review_db.end_session(session_id, "failed", error=str(e))
+            log.error("%s Error during scraping: %s", job_tag, e)
             log.error(traceback.format_exc())
             return False
 

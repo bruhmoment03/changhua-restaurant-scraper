@@ -1,12 +1,11 @@
 """Tests for structured logging setup (log_manager.py)."""
 
-import json
 import logging
-from pathlib import Path
+import json
 
 import pytest
 
-from modules.log_manager import setup_logging
+from modules.log_manager import _UvicornAccessFilter, setup_logging
 
 
 @pytest.fixture(autouse=True)
@@ -15,9 +14,12 @@ def _reset_root_logger():
     root = logging.getLogger()
     original_handlers = root.handlers[:]
     original_level = root.level
+    access_logger = logging.getLogger("uvicorn.access")
+    original_access_filters = access_logger.filters[:]
     yield
     root.handlers = original_handlers
     root.level = original_level
+    access_logger.filters = original_access_filters
 
 
 class TestSetupLogging:
@@ -79,3 +81,40 @@ class TestSetupLogging:
         setup_logging(log_dir=str(tmp_path), log_file="test.log")
         root = logging.getLogger()
         assert len(root.handlers) == 2
+
+    def test_dashboard_polling_access_logs_suppressed(self, tmp_path):
+        setup_logging(log_dir=str(tmp_path), log_file="test.log")
+        access_logger = logging.getLogger("uvicorn.access")
+        access_filter = next(
+            f for f in access_logger.filters if isinstance(f, _UvicornAccessFilter)
+        )
+
+        poll_record = logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='%s - "%s %s HTTP/%s" %d',
+            args=("127.0.0.1:8000", "GET", "/jobs?limit=100", "1.1", 200),
+            exc_info=None,
+        )
+        normal_record = logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='%s - "%s %s HTTP/%s" %d',
+            args=("127.0.0.1:8000", "GET", "/db-stats", "1.1", 200),
+            exc_info=None,
+        )
+
+        assert access_filter.filter(poll_record) is False
+        assert access_filter.filter(normal_record) is True
+
+    def test_reinit_does_not_duplicate_uvicorn_access_filters(self, tmp_path):
+        setup_logging(log_dir=str(tmp_path), log_file="test.log")
+        setup_logging(log_dir=str(tmp_path), log_file="test.log")
+        access_logger = logging.getLogger("uvicorn.access")
+
+        filters = [f for f in access_logger.filters if isinstance(f, _UvicornAccessFilter)]
+        assert len(filters) == 1

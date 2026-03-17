@@ -9,7 +9,7 @@
 
 ## Feature Artillery
 
-- **Bulletproof in 2026**: While the competition falls apart, we've cracked Google's latest tricks. Google locked reviews behind a "limited view" in Feb 2026? We bypassed it the same day via search-based navigation — no login needed!
+- **Bulletproof in 2026**: Handles Google’s limited-view rollout with search-based navigation and optional cookie-auth fail-fast mode for stricter reliability.
 - **Multi-Business Madness**: Scrape multiple businesses in one run with per-business config overrides. One config to rule them all.
 - **SQLite Fortress**: Primary storage with full audit history, change detection, and per-place isolation. Your data ain't going anywhere.
 - **MongoDB Sync**: Incremental sync — only changed reviews are pushed, unchanged reviews are skipped. Because why waste bandwidth?
@@ -139,6 +139,12 @@ See `config.sample.yaml` for all available settings and `config.businesses.sampl
 |---------|-----|---------|-------------|
 | **Scraper** | `headless` | `true` | Run Chrome without visible window |
 | | `sort_by` | `"newest"` | `newest`, `highest`, `lowest`, `relevance` |
+| | `google_maps_auth_mode` | `"anonymous"` | `anonymous` or `cookie` (env-cookie injection) |
+| | `fail_on_limited_view` | `auto` | Auto: `true` in cookie mode, `false` in anonymous mode |
+| | `debug_on_limited_view` | `true` | Save diagnostics when limited view is detected |
+| | `debug_artifacts_dir` | `"debug_artifacts"` | Directory for screenshot + JSON debug artifacts |
+| | `stealth_undetectable` | `false` | Enable optional undetectable driver mode |
+| | `stealth_user_agent` | `""` | Optional custom browser user-agent |
 | | `scrape_mode` | `"update"` | `new_only`, `update`, or `full` |
 | | `stop_threshold` | `3` | Consecutive fully-matched scroll batches before stopping (0 = disabled) |
 | | `max_reviews` | `0` | Max reviews to scrape (0 = unlimited) |
@@ -218,6 +224,98 @@ python start.py export -o my_reviews.json
 # Include soft-deleted reviews
 python start.py export --include-deleted
 ```
+
+### Places API Batch (Top 50 + CSV + XLSX)
+
+```bash
+# 1) Discover up to 50 Changhua restaurants (ranked by rating + ratings_total)
+# Requires: export GOOGLE_PLACES_API_KEY="..."
+python3 tools/places_textsearch_to_config.py \
+  --query "restaurants in Changhua City" \
+  --query-file batch/changhua_queries.txt \
+  --limit 50 \
+  --location 24.066007,120.53558 \
+  --radius-m 12000 \
+  --region tw \
+  --language en \
+  --rank-by composite \
+  --min-rating 4.0 \
+  --min-ratings-total 50 \
+  --max-reviews 100 \
+  --max-scroll-attempts 120 \
+  --scroll-idle-limit 40 \
+  --headed \
+  --out-config batch/config.top50.yaml \
+  --out-places-json batch/places_top50.json
+
+# 2) Preflight cookie env for cookie auth
+source .env.google_maps.cookies
+
+# 3) Baseline progress for the top-50 config
+python3 start.py progress --config batch/config.top50.yaml
+
+# 4) Scrape only incomplete targets (resume mode) with transient retry handling
+python3 start.py scrape --config batch/config.top50.yaml --only-missing
+
+# 5) Follow errors during runs
+python3 start.py logs --level ERROR --follow
+
+# 6) Gate check: fail CI/shell step if batch is still incomplete
+python3 start.py progress --config batch/config.top50.yaml --fail-if-incomplete
+
+# 7) Export all places to CSV files
+python3 start.py --config batch/config.top50.yaml export --format csv --output exports/csv
+
+# 8) Convert CSV exports to one XLSX workbook
+python3 tools/csv_exports_to_xlsx.py --csv-dir exports/csv --out exports/reviews.xlsx
+```
+
+### Top-50 Debug Loop (Fast)
+
+```bash
+# Run one incomplete target in headed mode for visual debugging
+python3 start.py scrape --config batch/config.top50.yaml --only-missing --max-businesses 1 --headed
+```
+
+### Dashboard (KOC-Style DB Inspector)
+
+```bash
+# 1) Install dashboard dependencies
+cd dashboard
+npm install
+cd ..
+
+# 2) Start API + dashboard together (recommended)
+./dev
+
+# Opens:
+# - API: http://127.0.0.1:8000
+# - Dashboard: http://127.0.0.1:3000
+# - API docs: http://127.0.0.1:8000/docs
+```
+
+Alternative alias (same behavior):
+
+```bash
+./run
+```
+
+Manual split-run (if you want separate terminals):
+
+```bash
+# Terminal 1
+python3 -m uvicorn api_server:app --host 127.0.0.1 --port 8000 --reload
+
+# Terminal 2
+cd dashboard
+NEXT_PUBLIC_API_BASE_URL="http://127.0.0.1:8000" npm run dev -- --hostname 127.0.0.1 --port 3000
+```
+
+Troubleshooting:
+- `./dev`/`./run` auto-loads `.env` from the project root.
+- `./dev`/`./run` also auto-loads `.env.google_maps.cookies` when present.
+- If API is not on `127.0.0.1:8000`, set `NEXT_PUBLIC_API_BASE_URL` before starting dashboard.
+- Ensure CORS allows your dashboard origin (`api.allowed_origins` or `ALLOWED_ORIGINS` env var).
 
 ### Database Management
 
@@ -301,6 +399,12 @@ curl http://localhost:8000/
 
 # Database statistics (places, reviews, sessions, db size)
 curl -H "X-API-Key: grs_your_key_here" http://localhost:8000/db-stats
+
+# Top-50 completion progress from a config file
+curl -H "X-API-Key: grs_your_key_here" "http://localhost:8000/progress?config_path=batch/config.top50.yaml"
+
+# Tail structured logs for dashboard diagnostics
+curl -H "X-API-Key: grs_your_key_here" "http://localhost:8000/system/log-tail?level=ERROR&limit=50"
 
 # Manual job cleanup
 curl -X POST -H "X-API-Key: grs_your_key_here" "http://localhost:8000/cleanup?max_age_hours=24"
@@ -533,7 +637,12 @@ Here's what you'll rip out of Google's clutches for each review (and yes, it's *
    - **SSL/TLS errors?** If using self-signed certs or local MongoDB, set `mongodb.tls_allow_invalid_certs: true` in your `config.yaml`
 
 3. **"Where Are My Reviews?!" Crisis**
-   - **Google "Limited View" (Feb 2026):** Google now shows a "limited view" to non-logged users on direct place URLs. Our scraper handles this automatically via search-based navigation — just make sure you're on the latest version!
+   - **Google "Limited View" (Feb 2026):** Signed-out sessions may not receive reviews at all.
+   - For stricter behavior, enable `google_maps_auth_mode: "cookie"` and set:
+     - `GOOGLE_MAPS_COOKIE_1PSID`
+     - `GOOGLE_MAPS_COOKIE_1PSIDTS`
+   - Optional cookies: `GOOGLE_MAPS_COOKIE_SID`, `GOOGLE_MAPS_COOKIE_HSID`, `GOOGLE_MAPS_COOKIE_SSID`, `GOOGLE_MAPS_COOKIE_SAPISID`
+   - In cookie mode, limited-view can fail fast (`fail_on_limited_view`) and emit debug artifacts.
    - Make sure your URL isn't garbage — copy directly from the address bar in Google Maps
    - Not all sort options work for all businesses. Try `--sort relevance` if all else fails
    - Some locations have zero reviews. Yes, it happens. No, it's not the scraper's fault.
@@ -628,7 +737,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 A: Look, I'm not your lawyer. Google doesn't want you to do it. It violates their ToS. It's your business whether that scares you or not. This tool exists for "research purposes" (wink wink). Use at your own risk, hotshot.
 
 **Q: Will this still work tomorrow/next week/when Google changes stuff?**
-A: Unlike 99% of the GitHub garbage that breaks when Google changes a CSS class, we're battle-hardened veterans of Google's interface wars. We update this beast CONSTANTLY. Google locked reviews behind a "limited view" in Feb 2026? We bypassed it the same day. This thing adapts faster than Google can change.
+A: Google Maps UI and signed-out behavior keep changing. This scraper now supports cookie-auth mode with fail-fast limited-view detection and debug artifacts, which improves recoverability when rollouts change behavior across regions.
 
 **Q: How do I avoid Google's ban hammer?**
 A: Our undetected-chromedriver does the heavy lifting, but:

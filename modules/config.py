@@ -14,6 +14,8 @@ log = logging.getLogger("scraper")
 
 # Default configuration path
 DEFAULT_CONFIG_PATH = Path("config.yaml")
+MAX_SCROLL_ATTEMPTS_CAP = 10
+SCROLL_IDLE_LIMIT_CAP = 10
 
 # Default configuration - will be overridden by config file
 DEFAULT_CONFIG = {
@@ -22,12 +24,18 @@ DEFAULT_CONFIG = {
     "businesses": [],
     "headless": True,
     "sort_by": "relevance",
+    "google_maps_auth_mode": "anonymous",  # anonymous | cookie
+    "fail_on_limited_view": None,  # auto: true in cookie mode, false in anonymous mode
+    "debug_on_limited_view": True,
+    "debug_artifacts_dir": "debug_artifacts",
+    "stealth_undetectable": False,
+    "stealth_user_agent": "",
     "scrape_mode": "update",
     "stop_on_match": False,
     "overwrite_existing": False,
     "max_reviews": 0,
-    "max_scroll_attempts": 50,
-    "scroll_idle_limit": 15,
+    "max_scroll_attempts": MAX_SCROLL_ATTEMPTS_CAP,
+    "scroll_idle_limit": SCROLL_IDLE_LIMIT_CAP,
     "use_mongodb": True,
     "mongodb": {
         "uri": "mongodb://localhost:27017",
@@ -69,6 +77,7 @@ DEFAULT_CONFIG = {
 
 _VALID_SCRAPE_MODES = {"new_only", "update", "full"}
 _VALID_SYNC_MODES = {"new_only", "update", "full"}
+_VALID_AUTH_MODES = {"anonymous", "cookie"}
 
 
 def resolve_aliases(config: Dict[str, Any]) -> None:
@@ -102,6 +111,47 @@ def _validate_config(config: Dict[str, Any]) -> None:
         if not isinstance(val, int) or val < 0:
             config[key] = DEFAULT_CONFIG[key]
 
+    if config["max_scroll_attempts"] > MAX_SCROLL_ATTEMPTS_CAP:
+        log.warning(
+            "max_scroll_attempts=%s is too high, clamping to %s",
+            config["max_scroll_attempts"],
+            MAX_SCROLL_ATTEMPTS_CAP,
+        )
+        config["max_scroll_attempts"] = MAX_SCROLL_ATTEMPTS_CAP
+
+    if config["scroll_idle_limit"] > SCROLL_IDLE_LIMIT_CAP:
+        log.warning(
+            "scroll_idle_limit=%s is too high, clamping to %s",
+            config["scroll_idle_limit"],
+            SCROLL_IDLE_LIMIT_CAP,
+        )
+        config["scroll_idle_limit"] = SCROLL_IDLE_LIMIT_CAP
+
+    auth_mode = str(config.get("google_maps_auth_mode", "anonymous")).strip().lower()
+    if auth_mode not in _VALID_AUTH_MODES:
+        log.warning(
+            "Invalid google_maps_auth_mode '%s', falling back to 'anonymous'",
+            auth_mode,
+        )
+        auth_mode = "anonymous"
+    config["google_maps_auth_mode"] = auth_mode
+
+    bool_keys = ("debug_on_limited_view", "stealth_undetectable")
+    for key in bool_keys:
+        val = config.get(key)
+        if not isinstance(val, bool):
+            config[key] = DEFAULT_CONFIG[key]
+
+    fail_on_limited_view = config.get("fail_on_limited_view")
+    if fail_on_limited_view is not None and not isinstance(fail_on_limited_view, bool):
+        config["fail_on_limited_view"] = DEFAULT_CONFIG["fail_on_limited_view"]
+
+    if not isinstance(config.get("debug_artifacts_dir"), str) or not config.get("debug_artifacts_dir", "").strip():
+        config["debug_artifacts_dir"] = DEFAULT_CONFIG["debug_artifacts_dir"]
+
+    if not isinstance(config.get("stealth_user_agent"), str):
+        config["stealth_user_agent"] = DEFAULT_CONFIG["stealth_user_agent"]
+
     mongo_cfg = config.get("mongodb", {})
     sync_mode = mongo_cfg.get("sync_mode", "update")
     if sync_mode not in _VALID_SYNC_MODES:
@@ -133,7 +183,7 @@ def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
                                 d[k] = v
 
                     deep_update(config, user_config)
-                    log.info(f"Loaded configuration from {config_path}")
+                    log.debug(f"Loaded configuration from {config_path}")
         except Exception as e:
             log.error(f"Error loading config from {config_path}: {e}")
             log.info("Using default configuration")

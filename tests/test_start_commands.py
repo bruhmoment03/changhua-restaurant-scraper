@@ -160,3 +160,162 @@ class TestSyncStatusCommand:
         _run_sync_status({}, args)
         output = capsys.readouterr().out
         assert "No sync checkpoints" in output
+
+
+class TestProgressCommand:
+    def _config_with_businesses(self):
+        return {
+            "businesses": [
+                {
+                    "url": "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+                    "custom_params": {"company": "A", "google_place_id": "PID_A"},
+                },
+                {
+                    "url": "https://www.google.com/maps/search/?api=1&query=B&query_place_id=PID_B",
+                    "custom_params": {"company": "B", "google_place_id": "PID_B"},
+                },
+                {
+                    "url": "https://www.google.com/maps/search/?api=1&query=C&query_place_id=PID_C",
+                    "custom_params": {"company": "C", "google_place_id": "PID_C"},
+                },
+            ]
+        }
+
+    def test_progress_summary_and_selection_helpers(self, tmp_path):
+        from start import _compute_progress_report, _select_businesses_for_scrape
+
+        db, db_path = _make_db(tmp_path)
+        try:
+            # A has reviews
+            db.upsert_place(
+                "place_a", "Place A",
+                "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+            )
+            db.upsert_review("place_a", _make_review("ra1"))
+
+            # B exists in DB but has zero reviews
+            db.upsert_place(
+                "place_b", "Place B",
+                "https://www.google.com/maps/search/?api=1&query=B&query_place_id=PID_B",
+            )
+
+            cfg = self._config_with_businesses()
+            businesses = cfg["businesses"]
+            report = _compute_progress_report(businesses, db)
+            assert report["targets_total"] == 3
+            assert report["with_reviews"] == 1
+            assert report["present_zero_reviews"] == 1
+            assert report["missing_from_db"] == 1
+
+            selected = _select_businesses_for_scrape(
+                businesses, report, only_missing=True, max_businesses=1
+            )
+            assert len(selected) == 1
+            assert selected[0]["custom_params"]["google_place_id"] in {"PID_B", "PID_C"}
+        finally:
+            db.close()
+
+    def test_progress_fail_if_incomplete_exits_nonzero(self, tmp_path):
+        from start import _run_progress
+        from types import SimpleNamespace
+
+        db, db_path = _make_db(tmp_path)
+        db.close()
+
+        cfg = self._config_with_businesses()
+        args = SimpleNamespace(
+            db_path=db_path,
+            config=None,
+            json=False,
+            fail_if_incomplete=True,
+        )
+        with pytest.raises(SystemExit) as exc:
+            _run_progress(cfg, args)
+        assert exc.value.code == 2
+
+
+class TestScrapeOverrides:
+    def test_new_limited_view_overrides_are_applied(self):
+        from start import _apply_scrape_overrides
+        from types import SimpleNamespace
+
+        config = {}
+        args = SimpleNamespace(
+            headless=False,
+            sort_by=None,
+            google_maps_auth_mode="cookie",
+            fail_on_limited_view=True,
+            debug_on_limited_view=True,
+            debug_artifacts_dir="debug_artifacts_custom",
+            stealth_undetectable=True,
+            stealth_user_agent="UA/1.0",
+            scrape_mode=None,
+            stop_threshold=None,
+            max_reviews=None,
+            max_scroll_attempts=None,
+            scroll_idle_limit=None,
+            url=None,
+            use_mongodb=None,
+            convert_dates=None,
+            download_images=None,
+            image_dir=None,
+            download_threads=None,
+            store_local_paths=None,
+            replace_urls=None,
+            custom_url_base=None,
+            custom_url_profiles=None,
+            custom_url_reviews=None,
+            preserve_original_urls=None,
+            overwrite_existing=False,
+            stop_on_match=False,
+            db_path=None,
+            custom_params=None,
+        )
+
+        _apply_scrape_overrides(config, args)
+        assert config["google_maps_auth_mode"] == "cookie"
+        assert config["fail_on_limited_view"] is True
+        assert config["debug_on_limited_view"] is True
+        assert config["debug_artifacts_dir"] == "debug_artifacts_custom"
+        assert config["stealth_undetectable"] is True
+        assert config["stealth_user_agent"] == "UA/1.0"
+
+    def test_headed_forces_headless_false(self):
+        from start import _apply_scrape_overrides
+        from types import SimpleNamespace
+
+        config = {"headless": True}
+        args = SimpleNamespace(
+            headless=False,
+            headed=True,
+            sort_by=None,
+            google_maps_auth_mode=None,
+            fail_on_limited_view=None,
+            debug_on_limited_view=None,
+            debug_artifacts_dir=None,
+            stealth_undetectable=None,
+            stealth_user_agent=None,
+            scrape_mode=None,
+            stop_threshold=None,
+            max_reviews=None,
+            max_scroll_attempts=None,
+            scroll_idle_limit=None,
+            url=None,
+            use_mongodb=None,
+            convert_dates=None,
+            download_images=None,
+            image_dir=None,
+            download_threads=None,
+            store_local_paths=None,
+            replace_urls=None,
+            custom_url_base=None,
+            custom_url_profiles=None,
+            custom_url_reviews=None,
+            preserve_original_urls=None,
+            overwrite_existing=False,
+            stop_on_match=False,
+            db_path=None,
+            custom_params=None,
+        )
+        _apply_scrape_overrides(config, args)
+        assert config["headless"] is False

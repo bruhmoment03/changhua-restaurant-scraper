@@ -1,5 +1,8 @@
 """Tests for ApiKeyDB — API key management and audit logging."""
 
+import sqlite3
+import time
+
 import pytest
 
 from modules.api_keys import ApiKeyDB
@@ -111,6 +114,20 @@ class TestAuditLog:
         rows = db.query_audit_log()
         assert len(rows) == 1
         assert rows[0]["key_id"] is None
+
+    def test_log_request_skips_quickly_when_db_is_locked(self, db):
+        lock_conn = sqlite3.connect(db._db.db_path, timeout=0.1)
+        try:
+            lock_conn.execute("BEGIN IMMEDIATE")
+            started = time.monotonic()
+            db.log_request(None, None, "/locked", "GET", None, 200, 1)
+            elapsed = time.monotonic() - started
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
+
+        assert elapsed < 1.0
+        assert db.query_audit_log() == []
 
     def test_query_filter_by_key_id(self, db):
         id1, _ = db.create_key("a")

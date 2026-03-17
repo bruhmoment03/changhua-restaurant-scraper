@@ -1,0 +1,26 @@
+headless: true
+sort_by: newest
+google_maps_auth_mode: cookie
+fail_on_limited_view: true
+debug_on_limited_view: true
+debug_artifacts_dir: debug_artifacts
+scrape_mode: update
+stop_threshold: 3
+max_reviews: 12
+max_scroll_attempts: 10
+scroll_idle_limit: 10
+db_path: reviews.db
+use_mongodb: false
+convert_dates: true
+download_images: false
+image_dir: review_images
+download_threads: 4
+backup_to_json: true
+json_path: google_reviews.json
+businesses:
+- url: https://www.google.com/maps/search/?api=1&query=%E9%96%B1%E4%BE%86%E9%A6%99&query_place_id=ChIJjWCRlII5aTQRNs95vQx9qsQ
+  custom_params:
+    company: 閱來香
+    address: No. 2號, Lane 76, Shijian Rd, Changhua City, Changhua County, 50066
+    source: Google Maps
+    google_place_id: ChIJjWCRlII5aTQRNs95vQx9qsQ

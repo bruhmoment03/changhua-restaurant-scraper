@@ -110,7 +110,7 @@ WebDriverException: Message: chrome not reachable
 
 3. **Try non-headless mode** to debug:
    ```bash
-   python start.py --headless false
+   python start.py --headed
    ```
 
 ---
@@ -308,7 +308,7 @@ TimeoutException: Reviews tab not found or could not be clicked
 
 1. **Try non-headless mode** to see what's happening:
    ```bash
-   python start.py --headless false
+   python start.py --headed
    ```
 
 2. **Check the URL** is a valid Google Maps place URL
@@ -321,6 +321,16 @@ TimeoutException: Reviews tab not found or could not be clicked
    ```bash
    python start.py --sort relevance
    ```
+
+6. **Use cookie-auth fail-fast mode** for Google’s signed-out limited-view rollout:
+   ```bash
+   export GOOGLE_MAPS_COOKIE_1PSID="..."
+   export GOOGLE_MAPS_COOKIE_1PSIDTS="..."
+   python start.py --google-maps-auth-mode cookie --fail-on-limited-view true
+   ```
+   Optional additional cookies:
+   `GOOGLE_MAPS_COOKIE_SID`, `GOOGLE_MAPS_COOKIE_HSID`,
+   `GOOGLE_MAPS_COOKIE_SSID`, `GOOGLE_MAPS_COOKIE_SAPISID`
 
 ---
 
@@ -339,6 +349,9 @@ WARNING: No review cards found in this iteration
 2. **Check if page requires login** for reviews
 3. **Wait longer** for page to load - add delay in config
 4. **Check for CAPTCHA** - may need to solve manually first
+5. **Inspect debug artifacts** (enabled by default for limited-view diagnostics):
+   - `debug_artifacts/*.png` (visual state)
+   - `debug_artifacts/*.json` (URL/title/body snippet + selector counts)
 
 ---
 

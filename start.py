@@ -8,17 +8,35 @@ Main entry point supporting scrape + management commands.
 
 import json
 import sys
+import time
 from pathlib import Path
 
 from modules.cli import parse_arguments
 from modules.config import load_config
+from modules.progress import (
+    compute_progress_report as _compute_progress_report,
+    resolve_businesses as _resolve_businesses,
+    select_businesses_for_scrape as _select_businesses_for_scrape,
+)
 
 
 def _apply_scrape_overrides(config, args):
     """Apply CLI argument overrides to config for scrape command."""
+    headless_override = None
+    if getattr(args, "headed", False):
+        headless_override = False
+    elif getattr(args, "headless", False):
+        headless_override = True
+
     overrides = {
-        "headless": args.headless if args.headless else None,
+        "headless": headless_override,
         "sort_by": args.sort_by,
+        "google_maps_auth_mode": getattr(args, "google_maps_auth_mode", None),
+        "fail_on_limited_view": getattr(args, "fail_on_limited_view", None),
+        "debug_on_limited_view": getattr(args, "debug_on_limited_view", None),
+        "debug_artifacts_dir": getattr(args, "debug_artifacts_dir", None),
+        "stealth_undetectable": getattr(args, "stealth_undetectable", None),
+        "stealth_user_agent": getattr(args, "stealth_user_agent", None),
         "scrape_mode": getattr(args, "scrape_mode", None),
         "stop_threshold": getattr(args, "stop_threshold", None),
         "max_reviews": getattr(args, "max_reviews", None),
@@ -63,21 +81,6 @@ def _get_db_path(config, args):
     return config.get("db_path", "reviews.db")
 
 
-def _resolve_businesses(config):
-    """Resolve business list from config (supports businesses, urls, or url)."""
-    businesses = config.get("businesses", [])
-    if businesses:
-        # Each entry is a dict with 'url' + optional overrides
-        return [b if isinstance(b, dict) else {"url": b} for b in businesses]
-
-    # Fallback: flat urls list or single url
-    urls = config.get("urls", [])
-    single_url = config.get("url")
-    if not urls and single_url:
-        urls = [single_url]
-    return [{"url": u} for u in urls]
-
-
 def _build_business_config(base_config, overrides):
     """Merge per-business overrides into a copy of the global config."""
     import copy
@@ -94,8 +97,76 @@ def _build_business_config(base_config, overrides):
     return merged
 
 
+def _is_transient_failure_message(message: str) -> bool:
+    """Detect transient browser/network failures eligible for retry."""
+    if not message:
+        return False
+    lower = message.lower()
+    if "limited view" in lower:
+        return False
+    markers = (
+        "err_internet_disconnected",
+        "invalid session id",
+        "no such window",
+        "web view not found",
+        "disconnected",
+        "timed out",
+        "timeout",
+        "chrome not reachable",
+        "unable to receive message from renderer",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _run_progress(config, args):
+    """Show config-vs-DB scraping progress for configured businesses."""
+    from modules.review_db import ReviewDB
+
+    businesses = _resolve_businesses(config)
+    if not businesses:
+        print("Error: No URL configured. Use --url or set 'businesses'/'urls' in config.yaml")
+        sys.exit(1)
+
+    db = ReviewDB(_get_db_path(config, args))
+    try:
+        report = _compute_progress_report(businesses, db)
+    finally:
+        db.close()
+
+    if getattr(args, "json", False):
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print("Batch Progress")
+        print("=" * 40)
+        print(f"  targets_total:       {report['targets_total']}")
+        print(f"  with_reviews:        {report['with_reviews']}")
+        print(f"  present_zero_reviews:{report['present_zero_reviews']}")
+        print(f"  missing_from_db:     {report['missing_from_db']}")
+        print(f"  completed_percent:   {report['completed_percent']:.2f}%")
+
+        incomplete = [
+            t for t in report["targets"]
+            if t["status"] in ("missing_from_db", "present_zero_reviews")
+        ]
+        if incomplete:
+            print("\nIncomplete targets:")
+            for target in incomplete:
+                company = target.get("company") or "<unknown>"
+                qpid = target.get("google_place_id") or "<missing>"
+                print(
+                    f"  - [{target['status']}] {company} | "
+                    f"query_place_id={qpid} | url={target.get('url', '')}"
+                )
+        else:
+            print("\nAll configured targets have at least one review in DB.")
+
+    if getattr(args, "fail_if_incomplete", False) and report["incomplete_total"] > 0:
+        sys.exit(2)
+
+
 def _run_scrape(config, args):
     """Run the scrape command."""
+    from modules.review_db import ReviewDB
     from modules.scraper import GoogleReviewsScraper
 
     _apply_scrape_overrides(config, args)
@@ -105,17 +176,123 @@ def _run_scrape(config, args):
         print("Error: No URL configured. Use --url or set 'businesses'/'urls' in config.yaml")
         sys.exit(1)
 
-    for i, biz in enumerate(businesses):
+    max_businesses = getattr(args, "max_businesses", None)
+    if max_businesses is not None and max_businesses <= 0:
+        print("Error: --max-businesses must be greater than 0")
+        sys.exit(1)
+
+    if getattr(args, "only_missing", False) or max_businesses is not None:
+        db = ReviewDB(_get_db_path(config, args))
+        try:
+            report = _compute_progress_report(businesses, db)
+        finally:
+            db.close()
+        businesses = _select_businesses_for_scrape(
+            businesses,
+            report,
+            only_missing=bool(getattr(args, "only_missing", False)),
+            max_businesses=max_businesses,
+        )
+        print(
+            f"Selected {len(businesses)} businesses "
+            f"(only_missing={bool(getattr(args, 'only_missing', False))}, "
+            f"max_businesses={max_businesses if max_businesses is not None else 'none'})"
+        )
+        if not businesses:
+            print("No businesses selected for this run.")
+            return
+
+    concurrency = max(1, min(4, getattr(args, "concurrency", 2) or 2))
+    retry_backoffs = (5, 15)
+    max_attempts = 3
+
+    def _scrape_one(index, biz):
+        """Scrape a single business with retry logic. Returns (success, url, error)."""
         biz_config = _build_business_config(config, biz)
         url = biz_config.get("url", "")
-        if len(businesses) > 1:
-            print(f"\n--- Scraping business {i + 1}/{len(businesses)}: {url} ---")
 
-        scraper = GoogleReviewsScraper(biz_config)
-        try:
-            scraper.scrape()
-        finally:
-            scraper.review_db.close()
+        # Force isolated Chrome profile when running concurrently
+        if concurrency > 1:
+            biz_config.pop("chrome_user_data_dir", None)
+
+        label = f"[{index + 1}/{len(businesses)}]"
+        print(f"\n--- {label} Starting: {url} ---")
+
+        attempt = 1
+        success = False
+        last_error = ""
+        while attempt <= max_attempts:
+            scraper = GoogleReviewsScraper(biz_config)
+            try:
+                success = bool(scraper.scrape())
+                last_error = str(getattr(scraper, "last_error_message", "") or "")
+                transient = bool(getattr(scraper, "last_error_transient", False))
+            finally:
+                scraper.review_db.close()
+
+            if success:
+                break
+
+            is_transient = transient or _is_transient_failure_message(last_error)
+            if not is_transient or attempt >= max_attempts:
+                break
+
+            delay = retry_backoffs[min(attempt - 1, len(retry_backoffs) - 1)]
+            print(
+                f"{label} Transient scrape failure (attempt {attempt}/{max_attempts})"
+                f"{': ' + last_error if last_error else ''}. Retrying in {delay}s..."
+            )
+            time.sleep(delay)
+            attempt += 1
+
+        if success:
+            print(f"{label} Completed: {url}")
+        else:
+            print(f"{label} Failed: {url}\n  error: {last_error}")
+
+        return success, url, last_error
+
+    if concurrency <= 1 or len(businesses) <= 1:
+        # Sequential mode — same as before
+        failed = 0
+        succeeded = 0
+        for i, biz in enumerate(businesses):
+            ok, _url, _err = _scrape_one(i, biz)
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+    else:
+        # Concurrent mode
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print(f"\nRunning with {concurrency} concurrent scrapers...")
+        failed = 0
+        succeeded = 0
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {}
+            for i, biz in enumerate(businesses):
+                # Stagger job starts by 5s to avoid simultaneous Google hits
+                if i > 0:
+                    time.sleep(5)
+                future = pool.submit(_scrape_one, i, biz)
+                futures[future] = i
+
+            for future in as_completed(futures):
+                try:
+                    ok, _url, _err = future.result()
+                    if ok:
+                        succeeded += 1
+                    else:
+                        failed += 1
+                except Exception as exc:
+                    failed += 1
+                    idx = futures[future]
+                    print(f"[{idx + 1}/{len(businesses)}] Unexpected error: {exc}")
+
+    if len(businesses) > 1:
+        print(f"\nBatch finished: succeeded={succeeded}, failed={failed}")
 
 
 def _run_export(config, args):
@@ -494,6 +671,7 @@ def main():
 
     commands = {
         "scrape": _run_scrape,
+        "progress": _run_progress,
         "export": _run_export,
         "db-stats": _run_db_stats,
         "clear": _run_clear,
@@ -520,4 +698,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted by user. Exiting.")
+        sys.exit(130)

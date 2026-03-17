@@ -5,11 +5,13 @@ Background job manager for Google Reviews Scraper.
 import logging
 import threading
 import uuid
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
+from urllib.parse import parse_qs, unquote, urlparse
 
 from modules.config import load_config
 from modules.scraper import GoogleReviewsScraper
@@ -70,6 +72,52 @@ class JobManager:
         self.jobs: Dict[str, ScrapingJob] = {}
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent_jobs)
         self.lock = threading.Lock()
+        self._shutting_down = False
+
+    @staticmethod
+    def _target_key_from_url(url: str) -> str:
+        """
+        Build a stable dedupe key for a Google Maps target URL.
+        Prefer query_place_id; otherwise fall back to /maps/place/<name_or_id>; then URL.
+        """
+        raw = (url or "").strip()
+        if not raw:
+            return "url:"
+        try:
+            parsed = urlparse(raw)
+            query = parse_qs(parsed.query)
+            query_place_id = (query.get("query_place_id") or [""])[0].strip()
+            if query_place_id:
+                return f"qpid:{query_place_id}"
+
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if "place" in path_parts:
+                idx = path_parts.index("place")
+                if idx + 1 < len(path_parts):
+                    place_token = unquote(path_parts[idx + 1]).strip().lower()
+                    if place_token:
+                        return f"place:{place_token}"
+
+            normalized = parsed._replace(fragment="").geturl()
+            return f"url:{normalized}"
+        except Exception:
+            return f"url:{raw}"
+
+    def _job_target_key(self, job: ScrapingJob) -> str:
+        key = str(job.config.get("target_key", "")).strip()
+        if key:
+            return key
+        key = self._target_key_from_url(job.url)
+        job.config["target_key"] = key
+        return key
+
+    def _find_active_job_for_target_locked(self, target_key: str) -> Optional[ScrapingJob]:
+        for job in self.jobs.values():
+            if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                continue
+            if self._job_target_key(job) == target_key:
+                return job
+        return None
         
     def create_job(self, url: str, config_overrides: Dict[str, Any] = None) -> str:
         """
@@ -82,33 +130,105 @@ class JobManager:
         Returns:
             Job ID
         """
-        job_id = str(uuid.uuid4())
-        
         # Load base config
         config = load_config()
-        
+
         # Apply URL
         config["url"] = url
-        
+
         # Apply any overrides
         if config_overrides:
             config.update(config_overrides)
-            
-        job = ScrapingJob(
-            job_id=job_id,
-            status=JobStatus.PENDING,
-            url=url,
-            config=config,
-            created_at=datetime.now(),
-            progress={"stage": "created", "message": "Job created and queued"},
-            cancel_event=threading.Event(),
-        )
-        
+
+        target_key = self._target_key_from_url(url)
+
         with self.lock:
+            if self._shutting_down:
+                raise RuntimeError("Job manager is shutting down")
+            existing = self._find_active_job_for_target_locked(target_key)
+            if existing:
+                log.info(
+                    "Skipped duplicate job for target %s; reusing active job %s",
+                    target_key,
+                    existing.job_id,
+                )
+                return existing.job_id
+
+            job_id = str(uuid.uuid4())
+            config["job_id"] = job_id
+            config["target_key"] = target_key
+
+            job = ScrapingJob(
+                job_id=job_id,
+                status=JobStatus.PENDING,
+                url=url,
+                config=config,
+                created_at=datetime.now(),
+                progress={"stage": "created", "message": "Job created and queued"},
+                cancel_event=threading.Event(),
+            )
             self.jobs[job_id] = job
-            
+
         log.info(f"Created scraping job {job_id} for URL: {url}")
         return job_id
+
+    def _promote_pending_jobs(self) -> None:
+        """Start pending jobs while capacity is available."""
+        while True:
+            with self.lock:
+                if self._shutting_down:
+                    return
+                running_count = sum(1 for j in self.jobs.values() if j.status == JobStatus.RUNNING)
+                if running_count >= self.max_concurrent_jobs:
+                    return
+
+                pending_jobs = [j for j in self.jobs.values() if j.status == JobStatus.PENDING]
+                if not pending_jobs:
+                    return
+
+                pending_jobs.sort(key=lambda j: j.created_at)
+                job = pending_jobs[0]
+                target_key = self._job_target_key(job)
+                running_duplicate = any(
+                    other.job_id != job.job_id
+                    and other.status == JobStatus.RUNNING
+                    and self._job_target_key(other) == target_key
+                    for other in self.jobs.values()
+                )
+                if running_duplicate:
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now()
+                    job.progress = {
+                        "stage": "cancelled",
+                        "message": "Skipped duplicate target; another job is already running",
+                    }
+                    log.info(
+                        "Cancelled pending duplicate job %s for target %s (already running)",
+                        job.job_id,
+                        target_key,
+                    )
+                    continue
+
+                job.status = JobStatus.RUNNING
+                job.started_at = datetime.now()
+                job.progress = {"stage": "starting", "message": "Initializing scraper"}
+                job_id = job.job_id
+
+            try:
+                self.executor.submit(self._run_scraping_job, job_id)
+                log.info(f"Started scraping job {job_id} from pending queue")
+            except RuntimeError as exc:
+                with self.lock:
+                    if job.status == JobStatus.RUNNING:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = datetime.now()
+                        job.error_message = str(exc)
+                        job.progress = {
+                            "stage": "cancelled",
+                            "message": "Job manager is shutting down",
+                        }
+                log.warning("Unable to start pending job %s: %s", job_id, exc)
+                return
     
     def start_job(self, job_id: str) -> bool:
         """
@@ -127,6 +247,11 @@ class JobManager:
             job = self.jobs[job_id]
             if job.status != JobStatus.PENDING:
                 return False
+            if self._shutting_down:
+                job.status = JobStatus.CANCELLED
+                job.completed_at = datetime.now()
+                job.progress = {"stage": "cancelled", "message": "Job manager is shutting down"}
+                return False
                 
             # Check if we can start more jobs
             running_count = sum(1 for j in self.jobs.values() if j.status == JobStatus.RUNNING)
@@ -138,7 +263,17 @@ class JobManager:
             job.progress = {"stage": "starting", "message": "Initializing scraper"}
             
         # Submit job to thread pool
-        future = self.executor.submit(self._run_scraping_job, job_id)
+        try:
+            self.executor.submit(self._run_scraping_job, job_id)
+        except RuntimeError as exc:
+            with self.lock:
+                if job.status == JobStatus.RUNNING:
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now()
+                    job.error_message = str(exc)
+                    job.progress = {"stage": "cancelled", "message": "Job manager is shutting down"}
+            log.warning("Unable to start job %s: %s", job_id, exc)
+            return False
         
         log.info(f"Started scraping job {job_id}")
         return True
@@ -154,16 +289,60 @@ class JobManager:
             with self.lock:
                 job = self.jobs[job_id]
                 job.progress = {"stage": "initializing", "message": "Setting up scraper"}
-            
-            # Create scraper with job config and cancel event
-            scraper = GoogleReviewsScraper(job.config, cancel_event=job.cancel_event)
+            retry_backoffs = (5, 15)
+            max_attempts = len(retry_backoffs) + 1
+            attempt = 1
+            success = False
+            last_error = ""
+            scraper = None
 
-            with self.lock:
-                job._scraper = scraper
-                job.progress = {"stage": "scraping", "message": "Scraping reviews in progress"}
+            while attempt <= max_attempts:
+                if job.cancel_event and job.cancel_event.is_set():
+                    break
 
-            # Run the scraping
-            success = scraper.scrape()
+                # Create scraper with job config and cancel event
+                scraper = GoogleReviewsScraper(job.config, cancel_event=job.cancel_event)
+
+                with self.lock:
+                    job._scraper = scraper
+                    if attempt == 1:
+                        job.progress = {"stage": "scraping", "message": "Scraping reviews in progress"}
+                    else:
+                        job.progress = {
+                            "stage": "scraping",
+                            "message": f"Retry attempt {attempt}/{max_attempts} in progress",
+                        }
+
+                # Run the scraping
+                success = bool(scraper.scrape())
+                last_error = str(getattr(scraper, "last_error_message", "") or "")
+                transient = bool(getattr(scraper, "last_error_transient", False))
+
+                with self.lock:
+                    job._scraper = None
+
+                if success or (job.cancel_event and job.cancel_event.is_set()):
+                    break
+
+                if (not transient) or attempt >= max_attempts:
+                    break
+
+                delay = retry_backoffs[min(attempt - 1, len(retry_backoffs) - 1)]
+                log.warning(
+                    "Transient scrape failure for job %s (attempt %d/%d): %s. Retrying in %ds.",
+                    job_id,
+                    attempt,
+                    max_attempts,
+                    last_error or "unknown error",
+                    delay,
+                )
+                with self.lock:
+                    job.progress = {
+                        "stage": "retrying",
+                        "message": f"Transient failure, retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
+                    }
+                time.sleep(delay)
+                attempt += 1
 
             # Mark job based on scrape result — never overwrite CANCELLED
             with self.lock:
@@ -176,7 +355,7 @@ class JobManager:
                 else:
                     job.status = JobStatus.FAILED
                     job.completed_at = datetime.now()
-                    job.error_message = "Scraper returned failure (no reviews found or navigation error)"
+                    job.error_message = last_error or "Scraper returned failure (no reviews found or navigation error)"
                     job.progress = {"stage": "failed", "message": "Scraping failed"}
 
                 job.reviews_count = getattr(scraper, 'total_reviews', None)
@@ -184,6 +363,8 @@ class JobManager:
                 job._scraper = None
 
             log.info(f"Completed scraping job {job_id}")
+            if not self._shutting_down:
+                self._promote_pending_jobs()
 
         except Exception as e:
             log.error(f"Error in scraping job {job_id}: {e}")
@@ -196,6 +377,8 @@ class JobManager:
                     job.progress = {"stage": "failed", "message": f"Job failed: {str(e)}"}
                 if job:
                     job._scraper = None
+            if not self._shutting_down:
+                self._promote_pending_jobs()
     
     def get_job(self, job_id: str) -> Optional[ScrapingJob]:
         """
@@ -325,4 +508,14 @@ class JobManager:
     def shutdown(self):
         """Shutdown the job manager"""
         log.info("Shutting down job manager")
+        with self.lock:
+            self._shutting_down = True
+            now = datetime.now()
+            for job in self.jobs.values():
+                if job.status == JobStatus.PENDING:
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = now
+                    job.progress = {"stage": "cancelled", "message": "Job manager shutdown"}
+                elif job.status == JobStatus.RUNNING and job.cancel_event:
+                    job.cancel_event.set()
         self.executor.shutdown(wait=True)
