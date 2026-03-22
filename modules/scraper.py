@@ -238,6 +238,24 @@ def _is_transient_browser_error(message: str) -> bool:
     return any(marker in lower for marker in markers)
 
 
+def _is_shutdown_cancellation_error(message: str) -> bool:
+    """Return True for browser disconnects that are expected during cancellation."""
+    lower = (message or "").lower()
+    if not lower:
+        return False
+    markers = (
+        "invalid session id",
+        "no such window",
+        "web view not found",
+        "connection refused",
+        "max retries exceeded",
+        "failed to establish a new connection",
+        "chrome not reachable",
+        "disconnected",
+    )
+    return any(marker in lower for marker in markers)
+
+
 class GoogleReviewsScraper:
     """Main scraper class for Google Maps reviews"""
 
@@ -3032,10 +3050,32 @@ class GoogleReviewsScraper:
             log.error("%s Limited view fail-fast: %s", job_tag, e)
             return False
         except Exception as e:
-            self.last_error_message = str(e)
+            raw_message = str(e)
+            cancellation_requested = bool(self.cancel_event and self.cancel_event.is_set())
+            if cancellation_requested and _is_shutdown_cancellation_error(raw_message):
+                message = "Scrape cancelled while browser session was closing"
+                self.last_error_message = message
+                self.last_error_transient = False
+                if session_id:
+                    total_found = sum(batch_stats.values())
+                    self.review_db.end_session(
+                        session_id,
+                        "cancelled",
+                        reviews_found=total_found,
+                        reviews_new=batch_stats.get("new", 0),
+                        reviews_updated=(
+                            batch_stats.get("updated", 0)
+                            + batch_stats.get("restored", 0)
+                        ),
+                        error=message,
+                    )
+                log.info("%s %s: %s", job_tag, message, raw_message)
+                return False
+
+            self.last_error_message = raw_message
             self.last_error_transient = _is_transient_browser_error(self.last_error_message)
             if session_id:
-                self.review_db.end_session(session_id, "failed", error=str(e))
+                self.review_db.end_session(session_id, "failed", error=raw_message)
             log.error("%s Error during scraping: %s", job_tag, e)
             log.error(traceback.format_exc())
             return False

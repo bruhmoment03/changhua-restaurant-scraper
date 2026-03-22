@@ -1,6 +1,7 @@
 """Focused tests for limited-view and auth behavior in scraper."""
 
 import inspect
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -247,6 +248,28 @@ def test_extract_total_reviews_hint_parses_multilingual_strings(tmp_path):
 
         body.text = "Rated 4.4 with 1,234 reviews"
         assert scraper._extract_total_reviews_hint(driver) == 1234
+    finally:
+        scraper.review_db.close()
+
+
+def test_scrape_treats_dead_browser_error_as_cancellation_noise(tmp_path, monkeypatch):
+    scraper = GoogleReviewsScraper(_minimal_config(tmp_path), cancel_event=threading.Event())
+    scraper.cancel_event.set()
+    try:
+        monkeypatch.setattr(
+            scraper,
+            "setup_driver",
+            lambda _headless: (_ for _ in ()).throw(
+                RuntimeError(
+                    "HTTPConnectionPool(host='localhost', port=52574): Max retries exceeded "
+                    "with url: /session/test/url (Caused by NewConnectionError('connection refused'))"
+                )
+            ),
+        )
+
+        assert scraper.scrape() is False
+        assert scraper.last_error_message == "Scrape cancelled while browser session was closing"
+        assert scraper.last_error_transient is False
     finally:
         scraper.review_db.close()
 

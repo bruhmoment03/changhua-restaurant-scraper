@@ -347,6 +347,12 @@ class JobManager:
             # Mark job based on scrape result — never overwrite CANCELLED
             with self.lock:
                 if job.status == JobStatus.CANCELLED:
+                    if job.completed_at is None:
+                        job.completed_at = datetime.now()
+                    if not job.error_message and self._shutting_down:
+                        job.error_message = "Job manager shutdown"
+                    if job.progress is None or job.progress.get("stage") != "cancelled":
+                        job.progress = {"stage": "cancelled", "message": "Job was cancelled"}
                     log.info(f"Job {job_id} was cancelled during execution")
                 elif success:
                     job.status = JobStatus.COMPLETED
@@ -515,7 +521,12 @@ class JobManager:
                 if job.status == JobStatus.PENDING:
                     job.status = JobStatus.CANCELLED
                     job.completed_at = now
+                    job.error_message = "Job manager shutdown"
                     job.progress = {"stage": "cancelled", "message": "Job manager shutdown"}
                 elif job.status == JobStatus.RUNNING and job.cancel_event:
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = now
+                    job.error_message = "Job manager shutdown"
+                    job.progress = {"stage": "cancelled", "message": "Job manager shutdown"}
                     job.cancel_event.set()
         self.executor.shutdown(wait=True)

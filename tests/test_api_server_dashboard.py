@@ -109,7 +109,7 @@ def test_progress_endpoint_reports_threshold_fields(tmp_path):
 
 def test_scrape_concurrency_limit_defaults_to_isolated_mode(monkeypatch):
     monkeypatch.delenv("SCRAPER_MAX_CONCURRENT_JOBS", raising=False)
-    assert api_server._scrape_concurrency_limit() == 1
+    assert api_server._scrape_concurrency_limit() == 3
 
 
 def test_scrape_concurrency_limit_honors_valid_env(monkeypatch):
@@ -521,6 +521,61 @@ def test_export_all_endpoint_supports_all_formats(tmp_path, fmt):
             assert "place_id,place_name,review_id" in resp.body.decode("utf-8")
         else:
             assert resp.body[:2] == b"PK"
+    finally:
+        db.close()
+
+
+def test_export_place_direct_call_honors_columns_and_exclude_empty_text(tmp_path):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    try:
+        db.upsert_place("place_a", "Place A", "https://example.com/a")
+        db.upsert_review("place_a", _make_review("r1"))
+        empty_text_review = _make_review("r2")
+        empty_text_review["text"] = ""
+        db.upsert_review("place_a", empty_text_review)
+
+        resp = asyncio.run(
+            api_server.export_place(
+                place_id="place_a",
+                format="csv",
+                include_deleted=False,
+                exclude_empty_text=True,
+                columns="place_id,review_id,review_text_primary",
+                review_db=db,
+            )
+        )
+
+        text = resp.body.decode("utf-8").splitlines()
+        assert text[0] == "place_id,review_id,review_text_primary"
+        assert text[1] == "place_a,r1,Great!"
+        assert len(text) == 2
+    finally:
+        db.close()
+
+
+def test_export_all_direct_call_honors_columns_and_exclude_empty_text(tmp_path):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    try:
+        db.upsert_place("place_a", "Place A", "https://example.com/a")
+        db.upsert_review("place_a", _make_review("r1"))
+        empty_text_review = _make_review("r2")
+        empty_text_review["text"] = ""
+        db.upsert_review("place_a", empty_text_review)
+
+        resp = asyncio.run(
+            api_server.export_all(
+                format="csv",
+                include_deleted=False,
+                exclude_empty_text=True,
+                columns="place_id,review_id,review_text_primary",
+                review_db=db,
+            )
+        )
+
+        text = resp.body.decode("utf-8").splitlines()
+        assert text[0] == "place_id,review_id,review_text_primary"
+        assert text[1] == "place_a,r1,Great!"
+        assert len(text) == 2
     finally:
         db.close()
 

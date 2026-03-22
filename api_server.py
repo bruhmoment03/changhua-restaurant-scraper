@@ -18,6 +18,7 @@ from typing import Dict, Any, List, Optional, Literal, Tuple
 
 import yaml
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Depends, Security, Request, APIRouter
+from fastapi.params import Param
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, HttpUrl, Field
@@ -118,7 +119,7 @@ def _load_local_env_files() -> None:
 
 def _scrape_concurrency_limit() -> int:
     """
-    Default to 2 concurrent scrapers.
+    Default to 3 concurrent scrapers.
 
     Each scraper uses its own Chrome instance in incognito mode with no shared
     user-data-dir, providing process-level isolation. SQLite WAL mode with
@@ -135,6 +136,47 @@ def _scrape_concurrency_limit() -> int:
         )
         return 1
     return max(1, limit)
+
+
+def _unwrap_param_value(value: Any) -> Any:
+    """Return the default value when a FastAPI Param leaks into direct calls."""
+    if isinstance(value, Param):
+        return value.default
+    return value
+
+
+def _normalize_export_options(
+    format_value: Any,
+    include_deleted: Any,
+    exclude_empty_text: Any,
+    sheet_name: Any,
+    columns: Any,
+) -> Tuple[str, bool, bool, Optional[str], Optional[List[str]]]:
+    normalized_format = str(_unwrap_param_value(format_value) or "xlsx").strip() or "xlsx"
+    normalized_include_deleted = bool(_unwrap_param_value(include_deleted))
+    normalized_exclude_empty_text = bool(_unwrap_param_value(exclude_empty_text))
+    normalized_sheet_name = _unwrap_param_value(sheet_name)
+    normalized_columns = _unwrap_param_value(columns)
+
+    if normalized_sheet_name is not None:
+        normalized_sheet_name = str(normalized_sheet_name).strip() or None
+
+    if normalized_columns is None:
+        col_list = None
+    else:
+        col_list = [
+            col.strip()
+            for col in str(normalized_columns).split(",")
+            if col.strip()
+        ] or None
+
+    return (
+        normalized_format,
+        normalized_include_deleted,
+        normalized_exclude_empty_text,
+        normalized_sheet_name,
+        col_list,
+    )
 
 
 @asynccontextmanager
@@ -2033,12 +2075,21 @@ async def export_place(
     include_deleted: bool = Query(False, description="Include soft-deleted rows"),
     exclude_empty_text: bool = Query(False, description="Exclude reviews with no text content"),
     sheet_name: Optional[str] = Query(None, description="Custom sheet name for XLSX exports"),
+    columns: Optional[str] = Query(None, description="Comma-separated list of columns to include"),
     review_db=Depends(get_review_db),
 ):
     """Download one place as JSON, CSV, or XLSX."""
     place = review_db.get_place(place_id)
     if not place:
         raise HTTPException(status_code=404, detail="Place not found")
+
+    format, include_deleted, exclude_empty_text, sheet_name, col_list = _normalize_export_options(
+        format_value=format,
+        include_deleted=include_deleted,
+        exclude_empty_text=exclude_empty_text,
+        sheet_name=sheet_name,
+        columns=columns,
+    )
 
     try:
         from modules.export_service import build_place_export
@@ -2050,6 +2101,7 @@ async def export_place(
             include_deleted=include_deleted,
             exclude_empty_text=exclude_empty_text,
             sheet_name=sheet_name,
+            columns=col_list,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -2067,9 +2119,18 @@ async def export_all(
     include_deleted: bool = Query(False, description="Include soft-deleted rows"),
     exclude_empty_text: bool = Query(False, description="Exclude reviews with no text content"),
     sheet_name: Optional[str] = Query(None, description="Custom sheet name for XLSX exports"),
+    columns: Optional[str] = Query(None, description="Comma-separated list of columns to include"),
     review_db=Depends(get_review_db),
 ):
     """Download all places as JSON, CSV, or XLSX."""
+    format, include_deleted, exclude_empty_text, sheet_name, col_list = _normalize_export_options(
+        format_value=format,
+        include_deleted=include_deleted,
+        exclude_empty_text=exclude_empty_text,
+        sheet_name=sheet_name,
+        columns=columns,
+    )
+
     try:
         from modules.export_service import build_all_export
 
@@ -2079,6 +2140,7 @@ async def export_all(
             include_deleted=include_deleted,
             exclude_empty_text=exclude_empty_text,
             sheet_name=sheet_name,
+            columns=col_list,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
