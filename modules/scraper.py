@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re
+import socket
 import threading
 import time
 import traceback
@@ -21,8 +22,6 @@ from seleniumbase import Driver
 from selenium.common.exceptions import (
     TimeoutException,
     StaleElementReferenceException,
-    InvalidSessionIdException,
-    NoSuchWindowException,
 )
 from selenium.webdriver import Chrome
 from selenium.webdriver.common.action_chains import ActionChains
@@ -82,6 +81,19 @@ SEARCH_RESULTS_LIST_MARKERS = (
     "已看完所有搜尋結果",
     "已看完所有搜索结果",
 )
+REVIEWS_END_MARKERS = (
+    "you've reached the end of the list",
+    "you've reached the end of the reviews",
+    "you reached the end of the list",
+    "you reached the end of the reviews",
+    "已看完所有評論",
+    "已看完所有评论",
+    "所有評論都已顯示",
+    "所有评论都已显示",
+)
+
+STUCK_SCROLL_RECOVERY_THRESHOLD = 3
+UC_DRIVER_CREATION_LOCK = threading.Lock()
 
 # CSS Selectors
 PANE_SEL = 'div[role="main"] div.m6QErb.DxyBCb.kA9KIf.dS8AEf'
@@ -219,27 +231,12 @@ class LimitedViewError(RuntimeError):
     """Raised when Google Maps limited-view prevents scraping reviews."""
 
 
-def _is_transient_browser_error(message: str) -> bool:
-    """Return True when message indicates retryable browser/network failures."""
-    lower = (message or "").lower()
-    if not lower or "limited view" in lower:
-        return False
-    markers = (
-        "err_internet_disconnected",
-        "invalid session id",
-        "no such window",
-        "web view not found",
-        "disconnected",
-        "timed out",
-        "timeout",
-        "chrome not reachable",
-        "unable to receive message from renderer",
-    )
-    return any(marker in lower for marker in markers)
+class TransientScrapeError(RuntimeError):
+    """Raised when the scraper should fail fast and let JobManager retry."""
 
 
-def _is_shutdown_cancellation_error(message: str) -> bool:
-    """Return True for browser disconnects that are expected during cancellation."""
+def _is_browser_transport_error(message: str) -> bool:
+    """Return True when message indicates the browser transport/session died."""
     lower = (message or "").lower()
     if not lower:
         return False
@@ -254,6 +251,30 @@ def _is_shutdown_cancellation_error(message: str) -> bool:
         "disconnected",
     )
     return any(marker in lower for marker in markers)
+
+
+def _is_transient_browser_error(message: str) -> bool:
+    """Return True when message indicates retryable browser/network failures."""
+    lower = (message or "").lower()
+    if not lower or "limited view" in lower:
+        return False
+    if _is_browser_transport_error(lower):
+        return True
+    markers = (
+        "err_internet_disconnected",
+        "timed out",
+        "timeout",
+        "unable to receive message from renderer",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _is_shutdown_cancellation_error(message: str) -> bool:
+    """Return True for browser disconnects that are expected during cancellation."""
+    lower = (message or "").lower()
+    if not lower:
+        return False
+    return _is_browser_transport_error(lower)
 
 
 class GoogleReviewsScraper:
@@ -358,6 +379,32 @@ class GoogleReviewsScraper:
     def _sanitize_filename(value: str, max_len: int = 80) -> str:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value or "").strip("._")
         return (safe[:max_len] or "unknown").strip("._")
+
+    @staticmethod
+    def _allocate_remote_debugging_port() -> int:
+        """Allocate a local Chrome remote-debugging port for one UC browser."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    def _job_tag(self, short: bool = False) -> str:
+        """Return a stable log/progress tag for the current scraper instance."""
+        job_id = self.job_id[:8] if short else self.job_id
+        return f"[job:{job_id}]"
+
+    def _progress_description(self, place_name: str = "", place_id: str = "") -> str:
+        """Build a distinct progress label so concurrent workers stay identifiable."""
+        label = str(place_name or "").strip()
+        if not label:
+            label = str(
+                ((self.config.get("custom_params", {}) or {}).get("company", ""))
+            ).strip()
+        if not label:
+            label = str(place_id or "").strip() or "target"
+        label = " ".join(label.split())
+        if len(label) > 36:
+            label = f"{label[:33].rstrip()}..."
+        return f"{self._job_tag(short=True)} {label}"
 
     def _collect_review_surface_counts(self, driver: Chrome) -> Dict[str, int]:
         """Count review-related UI signals on the current page."""
@@ -660,6 +707,25 @@ class GoogleReviewsScraper:
         if self.stealth_user_agent:
             stealth_kwargs["agent"] = self.stealth_user_agent
 
+        def _create_uc_driver(**extra_kwargs):
+            with UC_DRIVER_CREATION_LOCK:
+                remote_debug_port = self._allocate_remote_debugging_port()
+                driver_kwargs: Dict[str, Any] = {
+                    "uc": True,
+                    "headless": headless,
+                    "page_load_strategy": "normal",
+                    "chromium_arg": [f"remote-debugging-port={remote_debug_port}"],
+                    **stealth_kwargs,
+                }
+                if user_data_dir is not None:
+                    driver_kwargs["user_data_dir"] = user_data_dir
+                driver_kwargs.update(extra_kwargs)
+                log.info(
+                    "Creating SeleniumBase UC driver with isolated remote debugging port %s",
+                    remote_debug_port,
+                )
+                return Driver(**driver_kwargs)
+
         if in_container:
             chrome_binary = os.environ.get('CHROME_BIN')
             log.info(f"Container environment detected")
@@ -668,47 +734,25 @@ class GoogleReviewsScraper:
             # Create driver with custom binary location for containers
             if chrome_binary and os.path.exists(chrome_binary):
                 try:
-                    driver = Driver(
-                        uc=True,
-                        headless=headless,
+                    driver = _create_uc_driver(
                         binary_location=chrome_binary,
-                        user_data_dir=user_data_dir,
-                        page_load_strategy="normal",
-                        **stealth_kwargs,
                     )
                     log.info("Successfully created SeleniumBase UC driver with custom binary")
                 except Exception as e:
                     log.warning(f"Failed to create driver with custom binary: {e}")
                     # Fall back to default
-                    driver = Driver(
-                        uc=True,
-                        headless=headless,
-                        user_data_dir=user_data_dir,
-                        page_load_strategy="normal",
-                        **stealth_kwargs,
-                    )
+                    driver = _create_uc_driver()
                     log.info("Successfully created SeleniumBase UC driver with defaults")
             else:
-                driver = Driver(
-                    uc=True,
-                    headless=headless,
-                    user_data_dir=user_data_dir,
-                    page_load_strategy="normal",
-                    **stealth_kwargs,
-                )
+                driver = _create_uc_driver()
                 log.info("Successfully created SeleniumBase UC driver")
         else:
             # Regular OS environment - SeleniumBase handles version matching automatically
             log.info("Creating SeleniumBase UC Mode driver")
             try:
-                driver = Driver(
-                    uc=True,
-                    headless=headless,
-                    page_load_strategy="normal",
+                driver = _create_uc_driver(
                     # If using a persistent profile, incognito would defeat cookie reuse.
                     incognito=(user_data_dir is None),
-                    user_data_dir=user_data_dir,
-                    **stealth_kwargs,
                 )
                 log.info("Successfully created SeleniumBase UC driver")
             except Exception as e:
@@ -1141,7 +1185,7 @@ class GoogleReviewsScraper:
         2. Use Google Maps search-based navigation (avoids limited view)
         3. Fall back to direct URL if search doesn't work
         """
-        job_tag = f"[job:{self.job_id}]"
+        job_tag = self._job_tag()
         log.info("%s Navigating to place with limited-view bypass...", job_tag)
 
         # Step 1: Warm up - visit google.com first to establish session cookies
@@ -1671,62 +1715,280 @@ class GoogleReviewsScraper:
         log.info("Falling back to reviews pane as scroll target")
         return pane
 
+    def _visible_card_identity(self, card: WebElement) -> str:
+        """Return a stable identity for a visible card without requiring full parsing."""
+        try:
+            review_id = (card.get_attribute("data-review-id") or "").strip()
+            if review_id:
+                return review_id
+        except Exception:
+            pass
+
+        text_value = ""
+        try:
+            text_value = " ".join((card.text or "").split())[:500]
+        except Exception:
+            text_value = ""
+
+        if not text_value:
+            try:
+                text_value = " ".join(
+                    (card.get_attribute("textContent") or "").split()
+                )[:500]
+            except Exception:
+                text_value = ""
+
+        fingerprint = self._review_fingerprint(text=text_value)
+        return f"fp:{fingerprint}" if fingerprint else ""
+
+    def _capture_scroll_progress(
+        self,
+        driver: Chrome,
+        scroll_target: WebElement,
+        cards: List[WebElement] | None = None,
+    ) -> Dict[str, Any]:
+        """Capture scroll + visible-card signals used to detect real progress."""
+        state = {
+            "scroll_top": 0,
+            "client_height": 0,
+            "scroll_height": 0,
+            "visible_count": 0,
+            "first_card_id": "",
+            "last_card_id": "",
+            "target_tag": "",
+            "target_class": "",
+        }
+
+        try:
+            metrics = driver.execute_script(
+                """
+                const node = arguments[0];
+                if (!node) {
+                    return null;
+                }
+                const className =
+                    typeof node.className === 'string'
+                        ? node.className
+                        : (node.className && node.className.baseVal) || '';
+                return {
+                    scrollTop: node.scrollTop || 0,
+                    clientHeight: node.clientHeight || 0,
+                    scrollHeight: node.scrollHeight || 0,
+                    tagName: (node.tagName || '').toLowerCase(),
+                    className,
+                };
+                """,
+                scroll_target,
+            ) or {}
+            state["scroll_top"] = int(metrics.get("scrollTop") or 0)
+            state["client_height"] = int(metrics.get("clientHeight") or 0)
+            state["scroll_height"] = int(metrics.get("scrollHeight") or 0)
+            state["target_tag"] = str(metrics.get("tagName") or "")
+            state["target_class"] = str(metrics.get("className") or "")
+        except Exception:
+            pass
+
+        visible_ids: List[str] = []
+        for card in cards or []:
+            try:
+                if not card.is_displayed():
+                    continue
+            except Exception:
+                continue
+            state["visible_count"] += 1
+            identity = self._visible_card_identity(card)
+            if identity:
+                visible_ids.append(identity)
+
+        if visible_ids:
+            state["first_card_id"] = visible_ids[0]
+            state["last_card_id"] = visible_ids[-1]
+
+        return state
+
+    @staticmethod
+    def _scroll_progressed(
+        previous: Dict[str, Any] | None,
+        current: Dict[str, Any],
+        *,
+        discovered_card_ids: int = 0,
+        discovered_card_fingerprints: int = 0,
+    ) -> bool:
+        """Return True when any scroll-progress signal changed."""
+        if discovered_card_ids > 0 or discovered_card_fingerprints > 0:
+            return True
+        if previous is None:
+            return bool(
+                current.get("visible_count")
+                or current.get("scroll_top")
+                or current.get("first_card_id")
+                or current.get("last_card_id")
+            )
+        return any(
+            current.get(key) != previous.get(key)
+            for key in ("scroll_top", "visible_count", "first_card_id", "last_card_id")
+        )
+
+    @staticmethod
+    def _should_fail_for_review_gap(
+        total_reviews_hint: int | None,
+        known_reviews: int,
+        *,
+        positive_end_of_list_evidence: bool,
+        min_gap: int = 10,
+    ) -> bool:
+        """Return True when an exhausted zero-new run should fail and retry."""
+        if positive_end_of_list_evidence or total_reviews_hint is None:
+            return False
+        return total_reviews_hint >= (known_reviews + min_gap)
+
+    def _has_explicit_end_of_list_marker(self, driver: Chrome) -> bool:
+        """Best-effort detection for explicit Google Maps end-of-list copy."""
+        try:
+            body_text = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
+        except Exception:
+            return False
+        if not body_text or not self._has_active_reviews_surface(driver):
+            return False
+        return any(marker in body_text for marker in REVIEWS_END_MARKERS + SEARCH_RESULTS_LIST_MARKERS)
+
+    def _log_scroll_diagnostics(
+        self,
+        driver: Chrome,
+        *,
+        job_tag: str,
+        place_hint: str,
+        stage: str,
+        reason: str,
+        snapshot: Dict[str, Any] | None,
+        generation: int,
+        total_reviews_hint: int | None,
+    ) -> None:
+        """Emit structured scroll diagnostics and persist artifacts when possible."""
+        snapshot = snapshot or {}
+        log.warning(
+            "%s %s: reason=%s generation=%d target=%s.%s scrollTop=%s clientHeight=%s "
+            "scrollHeight=%s visible=%s first=%s last=%s total_reviews_hint=%s",
+            job_tag,
+            stage,
+            reason,
+            generation,
+            snapshot.get("target_tag", "") or "?",
+            snapshot.get("target_class", "") or "?",
+            snapshot.get("scroll_top", 0),
+            snapshot.get("client_height", 0),
+            snapshot.get("scroll_height", 0),
+            snapshot.get("visible_count", 0),
+            snapshot.get("first_card_id", "") or "-",
+            snapshot.get("last_card_id", "") or "-",
+            total_reviews_hint if total_reviews_hint is not None else "-",
+        )
+        self._write_debug_artifacts(
+            driver,
+            place_hint or "place",
+            stage,
+            {
+                "reason": reason,
+                "generation": generation,
+                "total_reviews_hint": total_reviews_hint,
+                "scroll_snapshot": snapshot,
+            },
+        )
+
+    @staticmethod
+    def _scroll_strategy_for_no_progress(no_progress_count: int) -> str:
+        """Return the next recovery strategy for repeated no-progress iterations."""
+        strategies = (
+            "scroll_by",
+            "wheel",
+            "page_down",
+            "end_key",
+            "card_end",
+            "window_fallback",
+        )
+        index = min(max(no_progress_count - 1, 0), len(strategies) - 1)
+        return strategies[index]
+
     @staticmethod
     def _scroll_reviews_forward(
         driver: Chrome,
         scroll_target: WebElement,
         last_card: WebElement | None = None,
-    ) -> None:
-        """Advance the reviews list using the scroll owner, with a stronger card-based fallback."""
+        *,
+        strategy: str = "scroll_by",
+    ) -> bool:
+        """Advance the reviews list using one explicit recovery strategy."""
         moved = False
-        try:
-            before, after = driver.execute_script(
-                """
-                const node = arguments[0];
-                const start = node.scrollTop || 0;
-                const step = Math.max(400, Math.floor((node.clientHeight || 0) * 0.85));
-                node.scrollBy(0, step);
-                return [start, node.scrollTop || 0];
-                """,
-                scroll_target,
-            )
-            moved = after > before
-        except Exception:
-            moved = False
+        strategy = str(strategy or "scroll_by").strip().lower()
 
-        if not moved and last_card is not None:
-            try:
-                before, after = driver.execute_script(
+        try:
+            before = int(
+                driver.execute_script("return arguments[0] ? (arguments[0].scrollTop || 0) : 0;", scroll_target)
+                or 0
+            )
+        except Exception:
+            before = 0
+
+        try:
+            if strategy == "scroll_by":
+                after = driver.execute_script(
+                    """
+                    const node = arguments[0];
+                    const start = node.scrollTop || 0;
+                    const step = Math.max(400, Math.floor((node.clientHeight || 0) * 0.85));
+                    node.scrollBy(0, step);
+                    return node.scrollTop || 0;
+                    """,
+                    scroll_target,
+                )
+                moved = int(after or 0) > before
+            elif strategy == "wheel":
+                after = driver.execute_script(
+                    """
+                    const node = arguments[0];
+                    const start = node.scrollTop || 0;
+                    const deltaY = Math.max(400, Math.floor((node.clientHeight || 0) * 0.85));
+                    node.dispatchEvent(
+                        new WheelEvent('wheel', {deltaY, bubbles: true, cancelable: true})
+                    );
+                    node.scrollBy(0, deltaY);
+                    return node.scrollTop || 0;
+                    """,
+                    scroll_target,
+                )
+                moved = int(after or 0) > before
+            elif strategy in ("page_down", "end_key"):
+                key = Keys.PAGE_DOWN if strategy == "page_down" else Keys.END
+                driver.execute_script(
+                    "arguments[0].focus && arguments[0].focus();",
+                    scroll_target,
+                )
+                scroll_target.send_keys(key)
+                after = driver.execute_script(
+                    "return arguments[0] ? (arguments[0].scrollTop || 0) : 0;",
+                    scroll_target,
+                )
+                moved = int(after or 0) > before
+            elif strategy == "card_end" and last_card is not None:
+                after = driver.execute_script(
                     """
                     const card = arguments[0];
                     const node = arguments[1];
                     const start = node ? (node.scrollTop || 0) : 0;
-
                     card.scrollIntoView({block:'end', inline:'nearest'});
-                    if (node && node.scrollHeight > node.clientHeight + 40) {
-                        node.scrollTo(0, node.scrollHeight);
-                        node.dispatchEvent(
-                            new WheelEvent('wheel', {
-                                deltaY: Math.max(400, Math.floor((node.clientHeight || 0) * 0.85)),
-                                bubbles: true,
-                            })
-                        );
-                    }
-
-                    return [start, node ? (node.scrollTop || 0) : start];
+                    return node ? (node.scrollTop || 0) : start;
                     """,
                     last_card,
                     scroll_target,
                 )
-                moved = after > before
-            except Exception:
-                moved = False
-
-        if not moved:
-            try:
+                moved = int(after or 0) > before
+            elif strategy == "window_fallback":
                 driver.execute_script("window.scrollBy(0, 500);")
-            except Exception:
-                pass
+                moved = False
+        except Exception:
+            moved = False
+
+        return moved
 
     def verify_reviews_tab_clicked(self, driver: Chrome) -> bool:
         """
@@ -2256,7 +2518,7 @@ class GoogleReviewsScraper:
         start_time = time.time()
         self.last_error_message = ""
         self.last_error_transient = False
-        job_tag = f"[job:{self.job_id}]"
+        job_tag = self._job_tag()
 
         url = self.config.get("url")
         headless = self.config.get("headless", True)
@@ -2470,7 +2732,10 @@ class GoogleReviewsScraper:
             )
             progress.start()
             displayed_review_count = logical_existing_count
-            task_id = progress.add_task("Scraped", completed=displayed_review_count)
+            task_id = progress.add_task(
+                self._progress_description(place_name=place_name, place_id=place_id),
+                completed=displayed_review_count,
+            )
             idle = 0
             processed_ids = set()
             processed_fingerprints = set()
@@ -2516,8 +2781,11 @@ class GoogleReviewsScraper:
                 )
                 zero_new_idle_limit = 6
             consecutive_no_cards = 0  # Track how many times we find zero cards
-            last_scroll_position = 0
-            scroll_stuck_count = 0
+            no_progress_iterations = 0
+            generation_no_progress_iterations = 0
+            scroll_target_generation = 1
+            positive_end_of_list_evidence = False
+            last_progress_snapshot: Dict[str, Any] | None = None
             end_confirmation_scrolls_remaining = -1
 
             def _fallback_review_id(raw: RawReview) -> str:
@@ -2532,14 +2800,64 @@ class GoogleReviewsScraper:
                 h = hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()[:16]
                 return f"fallback:{h}"
 
-            def _is_dead_session_error(exc: Exception) -> bool:
-                msg = str(exc).lower()
-                return (
-                    isinstance(exc, (InvalidSessionIdException, NoSuchWindowException))
-                    or "invalid session id" in msg
-                    or "no such window" in msg
-                    or "web view not found" in msg
+            def _current_known_total() -> int:
+                return logical_existing_count + len(session_new_ids)
+
+            def _transport_failure_is_retryable(exc: Exception) -> bool:
+                message = str(exc or "")
+                if self.cancel_event.is_set() and _is_shutdown_cancellation_error(message):
+                    return False
+                return _is_browser_transport_error(message)
+
+            def _rebind_scroll_target(reason: str) -> None:
+                nonlocal pane, scroll_target, scroll_target_generation
+                nonlocal generation_no_progress_iterations, last_progress_snapshot
+                pane = self._find_reviews_pane(driver, wait)
+                if not pane:
+                    raise TimeoutException("Reviews pane not found")
+                scroll_target = self._find_reviews_scroll_target(driver, pane)
+                driver.execute_script("window.scrollablePane = arguments[0];", scroll_target)
+                scroll_target_generation += 1
+                generation_no_progress_iterations = 0
+                last_progress_snapshot = None
+                log.info(
+                    "%s Rebound reviews scroll target (generation=%d, reason=%s)",
+                    job_tag,
+                    scroll_target_generation,
+                    reason,
                 )
+
+            def _raise_transient_scroll_failure(reason: str, snapshot: Dict[str, Any] | None = None) -> None:
+                message = (
+                    f"Transient scroll stall: {reason}. "
+                    f"Page hinted {total_reviews_hint} reviews but scraper only confirmed {_current_known_total()}."
+                )
+                self._log_scroll_diagnostics(
+                    driver,
+                    job_tag=job_tag,
+                    place_hint=place_name or place_id or "place",
+                    stage="scroll_stall",
+                    reason=reason,
+                    snapshot=snapshot,
+                    generation=scroll_target_generation,
+                    total_reviews_hint=total_reviews_hint,
+                )
+                raise TransientScrapeError(message)
+
+            def _maybe_raise_coverage_gap_transient(
+                reason: str,
+                snapshot: Dict[str, Any] | None = None,
+            ) -> None:
+                if (
+                    self.scrape_mode == "update"
+                    and not session_new_ids
+                    and self._should_fail_for_review_gap(
+                        total_reviews_hint,
+                        _current_known_total(),
+                        positive_end_of_list_evidence=positive_end_of_list_evidence,
+                    )
+                ):
+                    _raise_transient_scroll_failure(reason, snapshot=snapshot)
 
             def _consume_end_confirmation(reason: str) -> bool:
                 nonlocal end_confirmation_scrolls_remaining
@@ -2558,7 +2876,7 @@ class GoogleReviewsScraper:
                 end_confirmation_scrolls_remaining -= 1
                 return True
 
-            while attempts < max_attempts:
+            while attempts < max_attempts or idle >= max_idle or consecutive_no_cards > 5:
                 if self.cancel_event.is_set():
                     log.info("Scrape cancelled by user request")
                     raise InterruptedError("Scrape cancelled")
@@ -2567,6 +2885,8 @@ class GoogleReviewsScraper:
 
                 try:
                     cards = pane.find_elements(By.CSS_SELECTOR, CARD_SEL)
+                    if self._has_explicit_end_of_list_marker(driver):
+                        positive_end_of_list_evidence = True
 
                     # Check for valid cards
                     if len(cards) == 0:
@@ -2581,19 +2901,19 @@ class GoogleReviewsScraper:
                         if consecutive_no_cards > 5:
                             if _consume_end_confirmation("No cards found for 5+ iterations - might be at end of reviews"):
                                 attempts += 1
-                                self._scroll_reviews_forward(driver, scroll_target)
-                                time.sleep(1)
-                                driver.execute_script("window.scrollBy(0, 1000);")
+                                strategy = self._scroll_strategy_for_no_progress(max(no_progress_iterations, 1))
+                                self._scroll_reviews_forward(driver, scroll_target, strategy=strategy)
                                 time.sleep(1.5)
                                 continue
+                            positive_end_of_list_evidence = True
                             log.warning("%s No cards found after confirmation scrolls - stopping", job_tag)
                             break
 
                         attempts += 1
-                        # Try aggressive scrolling
-                        self._scroll_reviews_forward(driver, scroll_target)
-                        time.sleep(1)
-                        driver.execute_script("window.scrollBy(0, 1000);")  # Extra scroll
+                        if consecutive_no_cards >= 2:
+                            _rebind_scroll_target("no visible review cards")
+                        strategy = self._scroll_strategy_for_no_progress(max(no_progress_iterations, 1))
+                        self._scroll_reviews_forward(driver, scroll_target, strategy=strategy)
                         time.sleep(1.5)
                         continue
                     else:
@@ -2601,6 +2921,8 @@ class GoogleReviewsScraper:
 
                     batch_seen_count = 0  # Cards already in DB (for batch stop)
                     fresh_raws: List[Tuple[RawReview, str]] = []
+                    iteration_discovered_card_ids = 0
+                    iteration_discovered_card_fingerprints = 0
 
                     for card in cards:
                         try:
@@ -2618,6 +2940,7 @@ class GoogleReviewsScraper:
                                 if fingerprint in processed_fingerprints:
                                     continue
                                 processed_fingerprints.add(fingerprint)
+                                iteration_discovered_card_fingerprints += 1
 
                             if not raw.id:
                                 raw.id = _fallback_review_id(raw)
@@ -2629,6 +2952,7 @@ class GoogleReviewsScraper:
                             if raw.id in processed_ids:
                                 continue
                             processed_ids.add(raw.id)
+                            iteration_discovered_card_ids += 1
 
                             if raw.id in seen:
                                 batch_seen_count += 1
@@ -2638,14 +2962,49 @@ class GoogleReviewsScraper:
                         except StaleElementReferenceException:
                             continue
                         except Exception as e:
-                            if _is_dead_session_error(e):
-                                raise
+                            if _transport_failure_is_retryable(e):
+                                snapshot = self._capture_scroll_progress(driver, scroll_target, cards)
+                                self._log_scroll_diagnostics(
+                                    driver,
+                                    job_tag=job_tag,
+                                    place_hint=place_name or place_id or "place",
+                                    stage="browser_transport_failure",
+                                    reason=str(e),
+                                    snapshot=snapshot,
+                                    generation=scroll_target_generation,
+                                    total_reviews_hint=total_reviews_hint,
+                                )
+                                raise TransientScrapeError(str(e)) from e
                             log.warning("parse error - skipping card\n%s",
                                         traceback.format_exc(limit=1).strip())
                             continue
 
                     batch_total = len(fresh_raws) + batch_seen_count
                     batch_unchanged = batch_seen_count
+                    current_snapshot = self._capture_scroll_progress(driver, scroll_target, cards)
+                    progress_made = self._scroll_progressed(
+                        last_progress_snapshot,
+                        current_snapshot,
+                        discovered_card_ids=iteration_discovered_card_ids,
+                        discovered_card_fingerprints=iteration_discovered_card_fingerprints,
+                    )
+                    if progress_made:
+                        no_progress_iterations = 0
+                        generation_no_progress_iterations = 0
+                    else:
+                        no_progress_iterations += 1
+                        generation_no_progress_iterations += 1
+                        if no_progress_iterations == 1:
+                            self._log_scroll_diagnostics(
+                                driver,
+                                job_tag=job_tag,
+                                place_hint=place_name or place_id or "place",
+                                stage="scroll_stall",
+                                reason="first_no_progress_iteration",
+                                snapshot=current_snapshot,
+                                generation=scroll_target_generation,
+                                total_reviews_hint=total_reviews_hint,
+                            )
 
                     for raw, fingerprint in fresh_raws:
                         review_dict = {
@@ -2733,17 +3092,21 @@ class GoogleReviewsScraper:
                         if _consume_end_confirmation(f"No new reviews found after {max_idle} scroll attempts"):
                             attempts += 1
                             try:
+                                strategy = self._scroll_strategy_for_no_progress(max(no_progress_iterations, 1))
                                 self._scroll_reviews_forward(
                                     driver,
                                     scroll_target,
                                     cards[-1] if cards else None,
+                                    strategy=strategy,
                                 )
-                                time.sleep(0.5)
-                                driver.execute_script("window.scrollBy(0, 500);")
                                 time.sleep(1.0)
                             except Exception as e:
                                 log.warning(f"Error scrolling during confirmation pass: {e}")
                             continue
+                        _maybe_raise_coverage_gap_transient(
+                            f"no new reviews after {max_idle} scroll attempts plus confirmation scrolls",
+                            current_snapshot,
+                        )
                         log.info(
                             "%s Stopping: No new reviews found after %d scroll attempts plus confirmation scrolls",
                             job_tag,
@@ -2768,6 +3131,10 @@ class GoogleReviewsScraper:
                             and not session_new_ids
                             and idle >= zero_new_idle_limit
                         ):
+                            _maybe_raise_coverage_gap_transient(
+                                f"still 0 new reviews after {zero_new_idle_limit} idle attempts",
+                                current_snapshot,
+                            )
                             log.info(
                                 "%s Stopping early: still 0 new reviews after %d idle attempts in update mode",
                                 job_tag,
@@ -2778,94 +3145,57 @@ class GoogleReviewsScraper:
                             self.scrape_mode == "update"
                             and not session_new_ids
                             and total_reviews_hint is not None
-                            and len(seen) >= total_reviews_hint
+                            and _current_known_total() >= total_reviews_hint
                             and idle >= 4
                         ):
                             log.info(
                                 "%s Stopping early: DB already has %d reviews and page hint is %d (idle: %d)",
                                 job_tag,
-                                len(seen),
+                                _current_known_total(),
                                 total_reviews_hint,
                                 idle,
                             )
                             break
 
-                        # When no new reviews, scroll more aggressively
-                        try:
-                            # Try multiple scroll methods
-                            self._scroll_reviews_forward(
-                                driver,
-                                scroll_target,
-                                cards[-1] if cards else None,
-                            )
-                            time.sleep(0.3)
-                            driver.execute_script("window.scrollBy(0, 500);")  # Extra scroll
-                            time.sleep(0.3)
-                        except Exception as e:
-                            log.warning(f"Error scrolling: {e}")
                     else:
                         log.info("%s Found %d new reviews in this iteration", job_tag, len(fresh_raws))
                         end_confirmation_scrolls_remaining = -1
 
-                    # Check if we're actually scrolling or stuck
-                    try:
-                        current_scroll = driver.execute_script("return arguments[0].scrollTop;", scroll_target)
-                        if current_scroll == last_scroll_position and len(fresh_raws) == 0:
-                            scroll_stuck_count += 1
-                            log.warning(
-                                "%s Scroll position hasn't changed (stuck at %spx, stuck count: %d)",
-                                job_tag,
-                                current_scroll,
-                                scroll_stuck_count,
-                            )
+                    if not progress_made and no_progress_iterations > STUCK_SCROLL_RECOVERY_THRESHOLD:
+                        _maybe_raise_coverage_gap_transient(
+                            f"no scroll progress after {no_progress_iterations} iterations",
+                            current_snapshot,
+                        )
 
-                            if scroll_stuck_count > 5:
-                                log.warning("%s Scroll is stuck - trying alternative scroll method", job_tag)
-                                # Try clicking the last visible review to force loading
-                                try:
-                                    if cards:
-                                        driver.execute_script(
-                                            "arguments[0].scrollIntoView({block:'end', inline:'nearest'});",
-                                            cards[-1],
-                                        )
-                                    else:
-                                        driver.execute_script("arguments[0].lastElementChild.scrollIntoView();", scroll_target)
-                                    time.sleep(1)
-                                except:
-                                    pass
-                                scroll_stuck_count = 0
-                            if (
-                                self.scrape_mode == "update"
-                                and not session_new_ids
-                                and idle >= 4
-                                and scroll_stuck_count >= 4
-                            ):
-                                log.info(
-                                    "%s Stopping early: scroll remained stuck (%d iterations) with 0 new reviews",
-                                    job_tag,
-                                    scroll_stuck_count,
-                                )
-                                break
-                        else:
-                            scroll_stuck_count = 0
-                            last_scroll_position = current_scroll
-                    except:
-                        pass
+                    if not progress_made and generation_no_progress_iterations >= 2:
+                        _rebind_scroll_target(
+                            f"{generation_no_progress_iterations} consecutive no-progress iterations"
+                        )
+                        cards = pane.find_elements(By.CSS_SELECTOR, CARD_SEL)
+                        current_snapshot = self._capture_scroll_progress(driver, scroll_target, cards)
 
-                    # Use JavaScript for smoother scrolling
+                    strategy = (
+                        "scroll_by"
+                        if progress_made
+                        else self._scroll_strategy_for_no_progress(no_progress_iterations)
+                    )
                     try:
                         self._scroll_reviews_forward(
                             driver,
                             scroll_target,
                             cards[-1] if cards else None,
+                            strategy=strategy,
                         )
                     except Exception as e:
-                        log.warning(f"Error scrolling: {e}")
-                        # Try a simpler scroll method
-                        driver.execute_script("window.scrollBy(0, 300);")
+                        log.warning("Error scrolling with strategy %s: %s", strategy, e)
+                        try:
+                            driver.execute_script("window.scrollBy(0, 300);")
+                        except Exception:
+                            pass
 
                     # Smart wait: instead of fixed sleep, wait for new cards to appear in the DOM.
                     # Falls back to a max timeout if nothing loads (same end behavior, faster on avg).
+                    last_progress_snapshot = current_snapshot
                     prev_card_count = len(cards)
                     if len(fresh_raws) > 5:
                         max_wait = 0.7
@@ -2884,18 +3214,26 @@ class GoogleReviewsScraper:
                     # The pane or other element went stale, try to re-find
                     log.debug("Stale element encountered, re-finding elements")
                     try:
-                        pane = self._find_reviews_pane(driver, wait)
-                        if not pane:
-                            raise TimeoutException("Reviews pane not found")
-                        scroll_target = self._find_reviews_scroll_target(driver, pane)
-                        driver.execute_script("window.scrollablePane = arguments[0];", scroll_target)
+                        _rebind_scroll_target("stale element")
                     except Exception:
                         log.warning("Could not re-find reviews pane after stale element")
                         break
                 except Exception as e:
-                    if _is_dead_session_error(e):
-                        log.error("Browser session died during review loop: %s", e)
+                    if isinstance(e, TransientScrapeError):
                         raise
+                    if _transport_failure_is_retryable(e):
+                        snapshot = self._capture_scroll_progress(driver, scroll_target)
+                        self._log_scroll_diagnostics(
+                            driver,
+                            job_tag=job_tag,
+                            place_hint=place_name or place_id or "place",
+                            stage="browser_transport_failure",
+                            reason=str(e),
+                            snapshot=snapshot,
+                            generation=scroll_target_generation,
+                            total_reviews_hint=total_reviews_hint,
+                        )
+                        raise TransientScrapeError(str(e)) from e
                     log.warning(f"Error during review processing: {e}")
                     attempts += 1
                     time.sleep(1)
@@ -3042,6 +3380,24 @@ class GoogleReviewsScraper:
                 )
             log.info("%s %s", job_tag, message)
             return False
+        except TransientScrapeError as e:
+            self.last_error_message = str(e)
+            self.last_error_transient = True
+            if session_id:
+                total_found = sum(batch_stats.values())
+                self.review_db.end_session(
+                    session_id,
+                    "failed",
+                    reviews_found=total_found,
+                    reviews_new=batch_stats.get("new", 0),
+                    reviews_updated=(
+                        batch_stats.get("updated", 0)
+                        + batch_stats.get("restored", 0)
+                    ),
+                    error=str(e),
+                )
+            log.error("%s Transient scrape failure: %s", job_tag, e)
+            return False
         except LimitedViewError as e:
             self.last_error_message = str(e)
             self.last_error_transient = False
@@ -3081,6 +3437,11 @@ class GoogleReviewsScraper:
             return False
 
         finally:
+            if 'progress' in locals():
+                try:
+                    progress.stop()
+                except Exception:
+                    pass
             if driver is not None:
                 try:
                     driver.quit()

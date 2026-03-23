@@ -54,11 +54,11 @@ class TestNewDefaults:
 
     def test_max_scroll_attempts_default(self, tmp_path):
         config = load_config(tmp_path / "config.yaml")
-        assert config["max_scroll_attempts"] == 10
+        assert config["max_scroll_attempts"] == 50
 
     def test_scroll_idle_limit_default(self, tmp_path):
         config = load_config(tmp_path / "config.yaml")
-        assert config["scroll_idle_limit"] == 10
+        assert config["scroll_idle_limit"] == 15
 
     def test_google_maps_auth_mode_default(self, tmp_path):
         config = load_config(tmp_path / "config.yaml")
@@ -130,11 +130,17 @@ class TestValidation:
         _validate_config(config)
         assert config["max_reviews"] == DEFAULT_CONFIG["max_reviews"]
 
-    def test_scroll_limits_are_clamped(self):
-        config = {"max_scroll_attempts": 120, "scroll_idle_limit": 40}
+    def test_scroll_limits_preserve_supported_values(self):
+        config = {"max_scroll_attempts": 50, "scroll_idle_limit": 15}
         _validate_config(config)
-        assert config["max_scroll_attempts"] == 10
-        assert config["scroll_idle_limit"] == 10
+        assert config["max_scroll_attempts"] == 50
+        assert config["scroll_idle_limit"] == 15
+
+    def test_scroll_limits_are_clamped_to_new_caps(self):
+        config = {"max_scroll_attempts": 120, "scroll_idle_limit": 60}
+        _validate_config(config)
+        assert config["max_scroll_attempts"] == 100
+        assert config["scroll_idle_limit"] == 50
 
     def test_invalid_auth_mode_fallback(self):
         config = {"google_maps_auth_mode": "invalid"}

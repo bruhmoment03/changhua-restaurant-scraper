@@ -119,14 +119,14 @@ def _load_local_env_files() -> None:
 
 def _scrape_concurrency_limit() -> int:
     """
-    Default to 3 concurrent scrapers.
+    Default to a single concurrent scraper for reliability.
 
-    Each scraper uses its own Chrome instance in incognito mode with no shared
-    user-data-dir, providing process-level isolation. SQLite WAL mode with
-    busy_timeout=30s handles concurrent writes safely. Override via env var
-    SCRAPER_MAX_CONCURRENT_JOBS if needed.
+    Cookie-auth Google Maps runs are more stable when the dashboard/API avoids
+    spinning up multiple Chrome sessions at once. Operators can still override
+    this via SCRAPER_MAX_CONCURRENT_JOBS when they explicitly want more
+    throughput.
     """
-    raw = str(os.environ.get("SCRAPER_MAX_CONCURRENT_JOBS", "3")).strip()
+    raw = str(os.environ.get("SCRAPER_MAX_CONCURRENT_JOBS", "1")).strip()
     try:
         limit = int(raw)
     except ValueError:

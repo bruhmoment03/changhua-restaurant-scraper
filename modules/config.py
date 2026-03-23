@@ -14,8 +14,10 @@ log = logging.getLogger("scraper")
 
 # Default configuration path
 DEFAULT_CONFIG_PATH = Path("config.yaml")
-MAX_SCROLL_ATTEMPTS_CAP = 10
-SCROLL_IDLE_LIMIT_CAP = 10
+MAX_SCROLL_ATTEMPTS_CAP = 100
+SCROLL_IDLE_LIMIT_CAP = 50
+DEFAULT_MAX_SCROLL_ATTEMPTS = 50
+DEFAULT_SCROLL_IDLE_LIMIT = 15
 
 # Default configuration - will be overridden by config file
 DEFAULT_CONFIG = {
@@ -34,8 +36,8 @@ DEFAULT_CONFIG = {
     "stop_on_match": False,
     "overwrite_existing": False,
     "max_reviews": 0,
-    "max_scroll_attempts": MAX_SCROLL_ATTEMPTS_CAP,
-    "scroll_idle_limit": SCROLL_IDLE_LIMIT_CAP,
+    "max_scroll_attempts": DEFAULT_MAX_SCROLL_ATTEMPTS,
+    "scroll_idle_limit": DEFAULT_SCROLL_IDLE_LIMIT,
     "use_mongodb": True,
     "mongodb": {
         "uri": "mongodb://localhost:27017",

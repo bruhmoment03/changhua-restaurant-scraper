@@ -109,7 +109,7 @@ def test_progress_endpoint_reports_threshold_fields(tmp_path):
 
 def test_scrape_concurrency_limit_defaults_to_isolated_mode(monkeypatch):
     monkeypatch.delenv("SCRAPER_MAX_CONCURRENT_JOBS", raising=False)
-    assert api_server._scrape_concurrency_limit() == 3
+    assert api_server._scrape_concurrency_limit() == 1
 
 
 def test_scrape_concurrency_limit_honors_valid_env(monkeypatch):

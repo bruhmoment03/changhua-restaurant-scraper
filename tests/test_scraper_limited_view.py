@@ -7,7 +7,13 @@ from unittest.mock import MagicMock
 import pytest
 from selenium.common.exceptions import StaleElementReferenceException
 
-from modules.scraper import CARD_SEL, GoogleReviewsScraper, LimitedViewError
+from modules.scraper import (
+    CARD_SEL,
+    STUCK_SCROLL_RECOVERY_THRESHOLD,
+    GoogleReviewsScraper,
+    LimitedViewError,
+    _is_transient_browser_error,
+)
 
 
 def _minimal_config(tmp_path, **extra):
@@ -547,23 +553,292 @@ def test_find_reviews_scroll_target_prefers_scrollable_ancestor(tmp_path):
         scraper.review_db.close()
 
 
-def test_scroll_reviews_forward_uses_stronger_card_fallback_when_pane_stalls():
+def test_scroll_reviews_forward_scroll_by_returns_true_when_target_moves():
+    driver = MagicMock()
+    scroll_target = MagicMock()
+    driver.execute_script.side_effect = (120, 260)
+
+    moved = GoogleReviewsScraper._scroll_reviews_forward(driver, scroll_target)
+
+    assert moved is True
+    assert driver.execute_script.call_count == 2
+    assert "scrollTop || 0" in driver.execute_script.call_args_list[0][0][0]
+    assert "node.scrollBy(0, step)" in driver.execute_script.call_args_list[1][0][0]
+
+
+def test_scroll_reviews_forward_card_end_uses_last_card():
     driver = MagicMock()
     scroll_target = MagicMock()
     last_card = MagicMock()
-    driver.execute_script.side_effect = ([120, 120], [120, 260])
+    driver.execute_script.side_effect = (120, 260)
 
-    GoogleReviewsScraper._scroll_reviews_forward(driver, scroll_target, last_card)
+    moved = GoogleReviewsScraper._scroll_reviews_forward(
+        driver,
+        scroll_target,
+        last_card,
+        strategy="card_end",
+    )
 
+    assert moved is True
     assert driver.execute_script.call_count == 2
-    first_script, first_target = driver.execute_script.call_args_list[0][0]
     second_script, second_card, second_target = driver.execute_script.call_args_list[1][0]
-    assert "node.scrollBy(0, step)" in first_script
-    assert first_target is scroll_target
     assert "card.scrollIntoView" in second_script
-    assert "node.scrollTo(0, node.scrollHeight)" in second_script
     assert second_card is last_card
     assert second_target is scroll_target
+
+
+def test_scroll_reviews_forward_window_fallback_returns_false():
+    driver = MagicMock()
+    scroll_target = MagicMock()
+    driver.execute_script.side_effect = (120, None)
+
+    moved = GoogleReviewsScraper._scroll_reviews_forward(
+        driver,
+        scroll_target,
+        strategy="window_fallback",
+    )
+
+    assert moved is False
+    assert driver.execute_script.call_count == 2
+    assert driver.execute_script.call_args_list[1][0] == ("window.scrollBy(0, 500);",)
+
+
+def test_scroll_progressed_treats_changed_visible_tail_as_progress():
+    previous = {
+        "scroll_top": 11507,
+        "visible_count": 10,
+        "first_card_id": "review-1",
+        "last_card_id": "review-10",
+    }
+    current = {
+        "scroll_top": 11507,
+        "visible_count": 10,
+        "first_card_id": "review-1",
+        "last_card_id": "review-11",
+    }
+
+    assert GoogleReviewsScraper._scroll_progressed(previous, current) is True
+
+
+def test_scroll_progressed_treats_new_card_ids_as_progress():
+    previous = {"scroll_top": 11507, "visible_count": 10, "first_card_id": "review-1", "last_card_id": "review-10"}
+    current = {"scroll_top": 11507, "visible_count": 10, "first_card_id": "review-1", "last_card_id": "review-10"}
+
+    assert (
+        GoogleReviewsScraper._scroll_progressed(
+            previous,
+            current,
+            discovered_card_ids=1,
+        )
+        is True
+    )
+
+
+def test_transient_browser_error_includes_connection_refused():
+    message = (
+        "HTTPConnectionPool(host='localhost', port=53931): Max retries exceeded with url: "
+        "/session/test/url (Caused by NewConnectionError('connection refused'))"
+    )
+    assert _is_transient_browser_error(message) is True
+
+
+def test_should_fail_for_review_gap_requires_material_gap_and_no_end_evidence():
+    assert (
+        GoogleReviewsScraper._should_fail_for_review_gap(
+            200,
+            133,
+            positive_end_of_list_evidence=False,
+        )
+        is True
+    )
+    assert (
+        GoogleReviewsScraper._should_fail_for_review_gap(
+            140,
+            133,
+            positive_end_of_list_evidence=False,
+        )
+        is False
+    )
+    assert (
+        GoogleReviewsScraper._should_fail_for_review_gap(
+            200,
+            133,
+            positive_end_of_list_evidence=True,
+        )
+        is False
+    )
+
+
+def test_scrape_marks_transport_failure_inside_card_parse_as_transient(tmp_path, monkeypatch):
+    scraper = GoogleReviewsScraper(_minimal_config(tmp_path))
+    try:
+        monkeypatch.setattr("modules.scraper.time.sleep", lambda *_args, **_kwargs: None)
+
+        class _ImmediateWait:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def until(self, _condition):
+                return True
+
+        card = MagicMock()
+        pane = MagicMock()
+        pane.find_elements.return_value = [card]
+        scroll_target = MagicMock()
+        scroll_target.find_elements.return_value = [card]
+
+        driver = MagicMock()
+        driver.current_url = "https://www.google.com/maps/place/test/reviews"
+        driver.title = "Test Place - Google Maps"
+
+        def _execute_script(script, *args):
+            if "document.readyState" in script:
+                return "complete"
+            if "tagName" in script and "className" in script:
+                return {
+                    "scrollTop": 0,
+                    "clientHeight": 720,
+                    "scrollHeight": 2400,
+                    "tagName": "div",
+                    "className": "review-pane",
+                }
+            if "scrollTop || 0" in script:
+                return 0
+            return None
+
+        driver.execute_script.side_effect = _execute_script
+        driver.find_elements.return_value = []
+
+        monkeypatch.setattr("modules.scraper.WebDriverWait", _ImmediateWait)
+        monkeypatch.setattr("modules.scraper.extract_place_id", lambda *_args, **_kwargs: "place_1")
+        monkeypatch.setattr(scraper, "setup_driver", lambda _headless: driver)
+        monkeypatch.setattr(scraper, "navigate_to_place", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "_extract_place_name", lambda *_args, **_kwargs: "Test Place")
+        monkeypatch.setattr(scraper, "dismiss_cookies", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(scraper, "click_reviews_tab", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "set_sort", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "_has_reviews_surface", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "_find_reviews_pane", lambda *_args, **_kwargs: pane)
+        monkeypatch.setattr(scraper, "_find_reviews_scroll_target", lambda *_args, **_kwargs: scroll_target)
+        monkeypatch.setattr(scraper, "_extract_total_reviews_hint", lambda *_args, **_kwargs: 90)
+        monkeypatch.setattr(scraper, "_has_explicit_end_of_list_marker", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(scraper, "_write_debug_artifacts", lambda *_args, **_kwargs: None)
+
+        def _raise_transport(_card):
+            raise RuntimeError(
+                "HTTPConnectionPool(host='localhost', port=53931): Max retries exceeded with url: "
+                "/session/test/url (Caused by NewConnectionError('connection refused'))"
+            )
+
+        monkeypatch.setattr("modules.scraper.RawReview.from_card", _raise_transport)
+
+        scraper.review_db.upsert_place = MagicMock(return_value="place_1")
+        scraper.review_db.start_session = MagicMock(return_value="session_1")
+        scraper.review_db.get_review_ids = MagicMock(return_value=set())
+        scraper.review_db.get_reviews = MagicMock(return_value=[])
+        scraper.review_db.end_session = MagicMock()
+
+        assert scraper.scrape() is False
+        assert scraper.last_error_transient is True
+        assert "connection refused" in scraper.last_error_message.lower()
+        assert scraper.review_db.end_session.call_args[0][1] == "failed"
+    finally:
+        scraper.review_db.close()
+
+
+def test_scrape_fails_transiently_when_review_hint_materially_exceeds_seen_count(tmp_path, monkeypatch):
+    scraper = GoogleReviewsScraper(
+        _minimal_config(
+            tmp_path,
+            scrape_mode="update",
+            max_scroll_attempts=1,
+            scroll_idle_limit=1,
+        )
+    )
+    try:
+        monkeypatch.setattr("modules.scraper.time.sleep", lambda *_args, **_kwargs: None)
+
+        class _ImmediateWait:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def until(self, _condition):
+                return True
+
+        class _Raw:
+            id = "existing_1"
+            text = "Already stored"
+            rating = 4.0
+            likes = 0
+            lang = "en"
+            date = "today"
+            review_date = "2026-03-01"
+            author = "Alice"
+            profile = "https://maps.google.com/user/alice"
+            avatar = ""
+            owner_text = ""
+            photos = []
+
+        card = MagicMock()
+        card.is_displayed.return_value = True
+        card.text = "Already stored"
+        card.get_attribute.side_effect = lambda name: "existing_1" if name == "data-review-id" else ""
+
+        pane = MagicMock()
+        pane.find_elements.return_value = [card]
+        scroll_target = MagicMock()
+        scroll_target.find_elements.return_value = [card]
+
+        driver = MagicMock()
+        driver.current_url = "https://www.google.com/maps/place/test/reviews"
+        driver.title = "Test Place - Google Maps"
+
+        def _execute_script(script, *args):
+            if "document.readyState" in script:
+                return "complete"
+            if "tagName" in script and "className" in script:
+                return {
+                    "scrollTop": 120,
+                    "clientHeight": 720,
+                    "scrollHeight": 2400,
+                    "tagName": "div",
+                    "className": "review-pane",
+                }
+            if "scrollTop || 0" in script:
+                return 120
+            return None
+
+        driver.execute_script.side_effect = _execute_script
+        driver.find_elements.return_value = []
+
+        monkeypatch.setattr("modules.scraper.WebDriverWait", _ImmediateWait)
+        monkeypatch.setattr("modules.scraper.extract_place_id", lambda *_args, **_kwargs: "place_1")
+        monkeypatch.setattr(scraper, "setup_driver", lambda _headless: driver)
+        monkeypatch.setattr(scraper, "navigate_to_place", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "_extract_place_name", lambda *_args, **_kwargs: "Test Place")
+        monkeypatch.setattr(scraper, "dismiss_cookies", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(scraper, "click_reviews_tab", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "set_sort", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "_has_reviews_surface", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(scraper, "_find_reviews_pane", lambda *_args, **_kwargs: pane)
+        monkeypatch.setattr(scraper, "_find_reviews_scroll_target", lambda *_args, **_kwargs: scroll_target)
+        monkeypatch.setattr(scraper, "_extract_total_reviews_hint", lambda *_args, **_kwargs: 20)
+        monkeypatch.setattr(scraper, "_has_explicit_end_of_list_marker", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(scraper, "_write_debug_artifacts", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr("modules.scraper.RawReview.from_card", lambda _card: _Raw())
+
+        scraper.review_db.upsert_place = MagicMock(return_value="place_1")
+        scraper.review_db.start_session = MagicMock(return_value="session_1")
+        scraper.review_db.get_review_ids = MagicMock(return_value={"existing_1"})
+        scraper.review_db.get_reviews = MagicMock(return_value=[])
+        scraper.review_db.end_session = MagicMock()
+
+        assert scraper.scrape() is False
+        assert scraper.last_error_transient is True
+        assert "page hinted 20 reviews but scraper only confirmed 1" in scraper.last_error_message.lower()
+        assert scraper.review_db.end_session.call_args[0][1] == "failed"
+    finally:
+        scraper.review_db.close()
 
 
 def test_scrape_no_stale_fresh_cards_reference():
@@ -586,14 +861,49 @@ def test_backfill_disables_stop_threshold_when_seen_below_max_reviews():
 
 def test_scrape_fail_fast_on_dead_browser_session_errors():
     source = inspect.getsource(GoogleReviewsScraper.scrape)
-    assert "invalid session id" in source
-    assert "no such window" in source
-    assert "Browser session died during review loop" in source
+    assert "_transport_failure_is_retryable" in source
+    assert "raise TransientScrapeError(str(e)) from e" in source
 
 
 def test_scrape_emits_plain_scraped_progress_logs():
     source = inspect.getsource(GoogleReviewsScraper.scrape)
     assert "Scraped %d reviews so far" in source
+
+
+def test_progress_description_includes_short_job_tag_and_place_name(tmp_path):
+    scraper = GoogleReviewsScraper(
+        _minimal_config(
+            tmp_path,
+            job_id="12345678-90ab-cdef-1234-567890abcdef",
+            custom_params={"company": "Fallback Company"},
+        )
+    )
+    try:
+        assert (
+            scraper._progress_description(place_name="Do Nothing Day", place_id="place_123")
+            == "[job:12345678] Do Nothing Day"
+        )
+    finally:
+        scraper.review_db.close()
+
+
+def test_progress_description_falls_back_to_company_and_truncates(tmp_path):
+    scraper = GoogleReviewsScraper(
+        _minimal_config(
+            tmp_path,
+            job_id="abcdef12-3456-7890-abcd-ef1234567890",
+            custom_params={
+                "company": "A very long restaurant name that should be shortened for progress output"
+            },
+        )
+    )
+    try:
+        assert (
+            scraper._progress_description(place_name="", place_id="place_456")
+            == "[job:abcdef12] A very long restaurant name that..."
+        )
+    finally:
+        scraper.review_db.close()
 
 
 def test_scrape_uses_logical_existing_review_count_for_progress_display():
@@ -611,7 +921,83 @@ def test_scrape_runs_confirmation_scrolls_before_end_stop():
 def test_scrape_binds_to_dedicated_scroll_target():
     source = inspect.getsource(GoogleReviewsScraper.scrape)
     assert "scroll_target = self._find_reviews_scroll_target(driver, pane)" in source
-    assert "return arguments[0].scrollTop;" in source
+    assert "self._capture_scroll_progress(" in source
+
+
+def test_scrape_rebinds_scroll_target_after_two_no_progress_iterations():
+    source = inspect.getsource(GoogleReviewsScraper.scrape)
+    assert "generation_no_progress_iterations >= 2" in source
+    assert "_rebind_scroll_target(" in source
+
+
+def test_scrape_uses_material_review_gap_to_fail_transiently():
+    source = inspect.getsource(GoogleReviewsScraper.scrape)
+    assert "_maybe_raise_coverage_gap_transient(" in source
+    assert "no scroll progress after" in source
+    assert "still 0 new reviews after" in source
+
+
+def test_scrape_hard_stall_threshold_requires_four_no_progress_iterations():
+    source = inspect.getsource(GoogleReviewsScraper.scrape)
+    assert "no_progress_iterations > STUCK_SCROLL_RECOVERY_THRESHOLD" in source
+
+
+def test_scrape_loop_keeps_confirmation_paths_reachable_at_attempt_limit():
+    source = inspect.getsource(GoogleReviewsScraper.scrape)
+    assert "while attempts < max_attempts or idle >= max_idle or consecutive_no_cards > 5:" in source
+
+
+def test_setup_driver_forces_isolated_remote_debugging_port(tmp_path, monkeypatch):
+    scraper = GoogleReviewsScraper(_minimal_config(tmp_path))
+    try:
+        captured = []
+
+        def _fake_driver(**kwargs):
+            captured.append(kwargs)
+            driver = MagicMock()
+            driver.set_page_load_timeout = MagicMock()
+            driver.set_window_size = MagicMock()
+            driver.execute_cdp_cmd = MagicMock()
+            return driver
+
+        monkeypatch.setattr(scraper, "_allocate_remote_debugging_port", lambda: 45555)
+        monkeypatch.setattr("modules.scraper.Driver", _fake_driver)
+
+        scraper.setup_driver(headless=True)
+
+        assert captured[0]["chromium_arg"] == ["remote-debugging-port=45555"]
+    finally:
+        scraper.review_db.close()
+
+
+def test_setup_driver_uses_fresh_remote_debugging_port_per_browser(tmp_path, monkeypatch):
+    scraper = GoogleReviewsScraper(_minimal_config(tmp_path))
+    try:
+        ports = iter([45555, 45556])
+        captured = []
+
+        def _fake_driver(**kwargs):
+            captured.append(kwargs)
+            driver = MagicMock()
+            driver.set_page_load_timeout = MagicMock()
+            driver.set_window_size = MagicMock()
+            driver.execute_cdp_cmd = MagicMock()
+            return driver
+
+        monkeypatch.setattr(scraper, "_allocate_remote_debugging_port", lambda: next(ports))
+        monkeypatch.setattr("modules.scraper.Driver", _fake_driver)
+
+        scraper.setup_driver(headless=True)
+        scraper.setup_driver(headless=True)
+
+        assert captured[0]["chromium_arg"] == ["remote-debugging-port=45555"]
+        assert captured[1]["chromium_arg"] == ["remote-debugging-port=45556"]
+    finally:
+        scraper.review_db.close()
+
+
+def test_stuck_scroll_recovery_threshold_is_conservative_but_early():
+    assert STUCK_SCROLL_RECOVERY_THRESHOLD == 3
 
 
 def test_scrape_does_not_fail_fast_on_post_click_limited_view_probe():
