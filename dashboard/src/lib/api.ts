@@ -133,6 +133,10 @@ export type ScrapeAllResponse = {
   errors: Array<Record<string, unknown>>;
 };
 
+export type ScrapeSettings = {
+  max_concurrent_jobs: number;
+};
+
 export type ResetExhaustedResponse = {
   config_path: string;
   min_reviews: number;
@@ -266,6 +270,103 @@ export type DataHealthSummary = {
   invalid_archive_count: number;
   stale_total_examples: DbStats["places"];
   recent_invalid_places: InvalidPlaceArchive[];
+};
+
+export type DatasetBundleManifestArtifact = {
+  filename: string;
+  format: string;
+  row_count: number | null;
+  sha256: string | null;
+  columns: string[];
+};
+
+export type DatasetBundleSampleArtifact = {
+  filename: string;
+  row_cap: number;
+  selection_rule: string;
+};
+
+export type DatasetBundleManifest = {
+  generated_at: string | null;
+  bundle_version: string;
+  preprocessing_version: string;
+  config_path: string;
+  config_snapshot_sha256: string | null;
+  db_path_basename: string;
+  db_schema_version: number;
+  scope: string;
+  min_reviews: number;
+  include_deleted: boolean;
+  raw_sqlite_authoritative: boolean;
+  derived_artifacts_only: boolean;
+  artifact_count: number;
+  artifacts: DatasetBundleManifestArtifact[];
+  summary: Record<string, unknown>;
+  lineage_completeness: Record<string, Record<string, number>>;
+  provenance_caveats: string[];
+  qa_sample_pack: {
+    selection_version: string;
+    artifacts: DatasetBundleSampleArtifact[];
+  };
+};
+
+export type DatasetBundleFollowupTarget = {
+  config_order: number | null;
+  company: string;
+  config_source: string;
+  google_place_id: string;
+  place_id: string | null;
+  target_status: string;
+  db_review_count: number;
+  reviews_needed: number;
+  validation_status: string;
+  has_validation_lineage: boolean;
+  has_discovery_lineage: boolean;
+  missing_lineage_flag_count: number;
+  lineage_flags: string;
+  followup_priority_rank: number;
+  followup_reasons: string;
+};
+
+export type DatasetBundleQaReportExcerpt = {
+  generated_at: string | null;
+  summary: Record<string, unknown>;
+  review_flag_summary: Record<string, number>;
+  lineage_completeness: Record<string, Record<string, number>>;
+  followup_targets_summary: {
+    total: number;
+    counts_by_reason: Record<string, number>;
+  };
+  followup_targets: DatasetBundleFollowupTarget[];
+};
+
+export type DatasetBundleArtifact = DatasetBundleManifestArtifact & {
+  exists: boolean;
+  size_bytes: number | null;
+  download_path: string;
+  previewable: boolean;
+  preview_path: string | null;
+};
+
+export type DatasetBundleArtifactPreview = {
+  kind: string;
+  columns: string[];
+  rows: Array<Record<string, string>>;
+  sample_row_count: number;
+  total_row_count: number;
+  truncated: boolean;
+};
+
+export type DatasetBundleArtifactPreviewResponse = {
+  artifact: DatasetBundleArtifact;
+  preview: DatasetBundleArtifactPreview;
+};
+
+export type DatasetBundleSummary = {
+  output_dir: string;
+  manifest: DatasetBundleManifest;
+  qa_report_excerpt: DatasetBundleQaReportExcerpt;
+  artifacts: DatasetBundleArtifact[];
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
@@ -418,6 +519,7 @@ export async function scrapeAllWithSettings(payload: {
   minReviews?: number;
   defaultMaxReviews?: number | null;
   onlyBelowThreshold?: boolean;
+  excludeKnownBelowGoal?: boolean;
 }): Promise<ScrapeAllResponse> {
   return apiPost<ScrapeAllResponse>("/ops/scrape-all", {
     config_path: payload.configPath || "batch/config.top50.yaml",
@@ -425,6 +527,17 @@ export async function scrapeAllWithSettings(payload: {
     default_max_reviews:
       typeof payload.defaultMaxReviews === "number" ? payload.defaultMaxReviews : null,
     only_below_threshold: payload.onlyBelowThreshold ?? true,
+    exclude_known_below_goal: payload.excludeKnownBelowGoal ?? false,
+  });
+}
+
+export async function getScrapeSettings(): Promise<ScrapeSettings> {
+  return apiFetch<ScrapeSettings>("/ops/scrape/settings");
+}
+
+export async function updateScrapeSettings(maxConcurrentJobs: number): Promise<ScrapeSettings> {
+  return apiPost<ScrapeSettings>("/ops/scrape/settings", {
+    max_concurrent_jobs: maxConcurrentJobs,
   });
 }
 
@@ -590,12 +703,14 @@ export async function downloadPlaceExport(
   includeDeleted = false,
   excludeEmptyText = false,
   sheetName?: string,
+  columns?: string[],
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set("format", format);
   params.set("include_deleted", String(includeDeleted));
   params.set("exclude_empty_text", String(excludeEmptyText));
   if (sheetName) params.set("sheet_name", sheetName);
+  if (columns && columns.length > 0) params.set("columns", columns.join(","));
   await apiDownload(
     `/exports/places/${encodeURIComponent(placeId)}?${params.toString()}`,
     _defaultExportFilename("place", format, placeId)
@@ -606,12 +721,47 @@ export async function downloadAllExport(
   format: ExportFormat = "xlsx",
   includeDeleted = false,
   excludeEmptyText = false,
+  minReviewCount?: number | null,
   sheetName?: string,
+  columns?: string[],
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set("format", format);
   params.set("include_deleted", String(includeDeleted));
   params.set("exclude_empty_text", String(excludeEmptyText));
+  if (typeof minReviewCount === "number" && Number.isFinite(minReviewCount) && minReviewCount > 0) {
+    params.set("min_review_count", String(Math.floor(minReviewCount)));
+  }
   if (sheetName) params.set("sheet_name", sheetName);
+  if (columns && columns.length > 0) params.set("columns", columns.join(","));
   await apiDownload(`/exports/all?${params.toString()}`, _defaultExportFilename("all", format));
+}
+
+export async function getLatestDatasetBundle(): Promise<DatasetBundleSummary> {
+  return apiFetch<DatasetBundleSummary>("/exports/dataset-bundle/latest");
+}
+
+export async function generateDatasetBundle(payload?: {
+  configPath?: string;
+  minReviews?: number;
+  includeDeleted?: boolean;
+}): Promise<DatasetBundleSummary> {
+  return apiPost<DatasetBundleSummary>("/exports/dataset-bundle/generate", {
+    config_path: payload?.configPath || "batch/config.top50.yaml",
+    min_reviews: payload?.minReviews ?? 100,
+    include_deleted: payload?.includeDeleted ?? false,
+  });
+}
+
+export async function downloadDatasetBundleArtifact(
+  downloadPath: string,
+  fallbackFilename: string,
+): Promise<void> {
+  await apiDownload(downloadPath, fallbackFilename);
+}
+
+export async function getDatasetBundleArtifactPreview(
+  previewPath: string,
+): Promise<DatasetBundleArtifactPreviewResponse> {
+  return apiFetch<DatasetBundleArtifactPreviewResponse>(previewPath);
 }

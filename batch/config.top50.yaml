@@ -7,8 +7,8 @@ debug_artifacts_dir: debug_artifacts
 scrape_mode: update
 stop_threshold: 3
 max_reviews: 100
-max_scroll_attempts: 10
-scroll_idle_limit: 10
+max_scroll_attempts: 50
+scroll_idle_limit: 15
 db_path: reviews.db
 use_mongodb: false
 convert_dates: true
@@ -322,13 +322,6 @@ businesses:
       B1"
     source: Google Maps
     google_place_id: ChIJITRvqLs4aTQRBf-GygycdJU
-- url: https://www.google.com/maps/search/?api=1&query=LeeLi%27s&query_place_id=ChIJV2ve_v1FaTQR-f0DBh454Dg
-  custom_params:
-    company: LeeLi's
-    address: "505, Changhua County, Lukang Township, Xinghua St, 40-1\u865F\u865F\
-      \ 50569"
-    source: Google Maps
-    google_place_id: ChIJV2ve_v1FaTQR-f0DBh454Dg
 - url: https://www.google.com/maps/search/?api=1&query=BVKcurry+%E5%BF%85%E5%92%96%E5%93%A9&query_place_id=ChIJY01aV4Y4aTQRASpQIfeH_hM
   custom_params:
     company: "BVKcurry \u5FC5\u5496\u54E9"
@@ -583,3 +576,636 @@ businesses:
       \ 500"
     source: Google Maps
     google_place_id: ChIJD88b3ZA4aTQRgrvIRan4FEg
+- url: https://www.google.com/maps/search/?api=1&query=%E5%9C%B06%E6%94%A4%E7%89%9B%E6%8E%92+%E5%BD%B0%E5%8C%96%E5%BA%97&query_place_id=ChIJhSmABL44aTQRi9o9eOC7SzY
+  custom_params:
+    company: "\u57306\u6524\u725B\u6392 \u5F70\u5316\u5E97"
+    address: "No. 347\u865F, Sanmin Rd, Changhua City, Changhua County, Taiwan 50043"
+    source: Google Maps
+    google_place_id: ChIJhSmABL44aTQRi9o9eOC7SzY
+- url: https://www.google.com/maps/search/?api=1&query=%E8%80%81%E5%A3%AB%E5%AE%98%E9%95%B7%E7%89%9B%E8%82%89%E9%BA%B5&query_place_id=ChIJbTZVruo4aTQR6CnUDydp_YY
+  custom_params:
+    company: "\u8001\u58EB\u5B98\u9577\u725B\u8089\u9EB5"
+    address: No. 51, Section 1, Zhongzheng Rd, Changhua City, Changhua County, Taiwan
+      500
+    source: Google Maps
+    google_place_id: ChIJbTZVruo4aTQR6CnUDydp_YY
+- url: https://www.google.com/maps/search/?api=1&query=%E9%98%BF%E7%8F%A0%E7%88%8C%E8%82%89%E9%A3%AF&query_place_id=ChIJ00_kTJc4aTQRTsMiwBObccs
+  custom_params:
+    company: "\u963F\u73E0\u720C\u8089\u98EF"
+    address: "No. 79\u865F, Heping Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ00_kTJc4aTQRTsMiwBObccs
+- url: https://www.google.com/maps/search/?api=1&query=Do+Nothing+Day&query_place_id=ChIJDW-Gx805aTQR0hppEI_zK5Y
+  custom_params:
+    company: Do Nothing Day
+    address: "No. 6\u865F, Lane 25, Minsheng S Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJDW-Gx805aTQR0hppEI_zK5Y
+- url: https://www.google.com/maps/search/?api=1&query=%E5%97%91%E5%92%96%E5%93%A9&query_place_id=ChIJFSgFZ5o4aTQRspqs4gv_o7M
+  custom_params:
+    company: "\u55D1\u5496\u54E9"
+    address: "No. 59\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJFSgFZ5o4aTQRspqs4gv_o7M
+- url: https://www.google.com/maps/search/?api=1&query=%E8%B7%AF%E6%80%9D%E5%A4%A7%E6%96%B0%E5%89%B5%E5%9C%92%E5%8D%80+%7C+%E7%BE%A9%E5%BC%8F%E5%92%96%E5%95%A1%E5%BB%B3&query_place_id=ChIJgUoUAbY5aTQRanFXoUF1Kjo
+  custom_params:
+    company: "\u8DEF\u601D\u5927\u65B0\u5275\u5712\u5340 | \u7FA9\u5F0F\u5496\u5561\
+      \u5EF3"
+    address: "No. 70-2\u865F, Lane 714, Section 3, Zhongshan Rd, Changhua City, Changhua\
+      \ County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJgUoUAbY5aTQRanFXoUF1Kjo
+- url: https://www.google.com/maps/search/?api=1&query=%E9%A3%9F%E9%96%93%C2%B7%E6%89%8B%E4%BD%9C%E7%87%92%E9%A4%85%E2%80%94%E6%99%9A%E9%A4%90%E5%AE%B5%E5%A4%9C%E6%97%A9%E9%A4%90&query_place_id=ChIJc6aDR5Q5aTQRjNCP2TjFQWk
+  custom_params:
+    company: "\u98DF\u9593\xB7\u624B\u4F5C\u71D2\u9905\u2014\u665A\u9910\u5BB5\u591C\
+      \u65E9\u9910"
+    address: "No. 167\u865F, Guangfu Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJc6aDR5Q5aTQRjNCP2TjFQWk
+- url: https://www.google.com/maps/search/?api=1&query=%E8%B1%AA%E7%88%BD%E6%96%99%E7%90%86%E4%BA%AD&query_place_id=ChIJvYGPRD05aTQRHNHR_1TGyh0
+  custom_params:
+    company: "\u8C6A\u723D\u6599\u7406\u4EAD"
+    address: "No. 43\u865F, Yongxing St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJvYGPRD05aTQRHNHR_1TGyh0
+- url: https://www.google.com/maps/search/?api=1&query=%E8%97%8D%E7%9B%A4%E5%AD%90%E6%97%A9%E5%8D%88%E9%A4%90_%E5%BD%B0%E5%8C%96%E7%AB%99%E5%89%8D%E5%BA%97&query_place_id=ChIJD4cOUcg5aTQR4LKoenkpxRU
+  custom_params:
+    company: "\u85CD\u76E4\u5B50\u65E9\u5348\u9910_\u5F70\u5316\u7AD9\u524D\u5E97"
+    address: "No. 169\u865F, Guangfu Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJD4cOUcg5aTQR4LKoenkpxRU
+- url: https://www.google.com/maps/search/?api=1&query=%E7%94%BA%E5%8F%83%E9%85%92%E9%A3%9F&query_place_id=ChIJ4QvyUow5aTQR6mJYDekGhcI
+  custom_params:
+    company: "\u753A\u53C3\u9152\u98DF"
+    address: "50041, Taiwan, Changhua County, Changhua City, Jixiang St, 8\u5DF711\u865F"
+    source: Google Maps
+    google_place_id: ChIJ4QvyUow5aTQR6mJYDekGhcI
+- url: https://www.google.com/maps/search/?api=1&query=%E5%BD%B0%E5%8C%96%E3%80%90Mini+%E2%80%A2+OZ%E3%80%91%E6%97%A9%E5%8D%88%E9%A4%90%EF%BD%9C%E5%BD%B0%E5%8C%96%E7%BE%8E%E9%A3%9F%EF%BD%9C%E5%BD%B0%E5%8C%96%E6%97%A9%E5%8D%88%E9%A4%90%EF%BD%9C%E6%BE%B3%E5%BC%8F%E6%97%A9%E5%8D%88%E9%A4%90%EF%BD%9C%E5%BD%B0%E5%8C%96%E7%81%AB%E8%BB%8A%E7%AB%99%E7%BE%8E%E9%A3%9F%EF%BD%9C%E5%BD%B0%E5%8C%96brunch%EF%BD%9C%E5%BD%B0%E5%8C%96brunch%E6%8E%A8%E8%96%A6&query_place_id=ChIJn_88UJY5aTQRZDxMyfnXqhY
+  custom_params:
+    company: "\u5F70\u5316\u3010Mini \u2022 OZ\u3011\u65E9\u5348\u9910\uFF5C\u5F70\
+      \u5316\u7F8E\u98DF\uFF5C\u5F70\u5316\u65E9\u5348\u9910\uFF5C\u6FB3\u5F0F\u65E9\
+      \u5348\u9910\uFF5C\u5F70\u5316\u706B\u8ECA\u7AD9\u7F8E\u98DF\uFF5C\u5F70\u5316\
+      brunch\uFF5C\u5F70\u5316brunch\u63A8\u85A6"
+    address: "No. 260\u865F, Zhonghua Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJn_88UJY5aTQRZDxMyfnXqhY
+- url: https://www.google.com/maps/search/?api=1&query=%E6%98%9F%E9%87%8E%E6%89%8B%E4%BD%9C%E6%96%99%E4%BA%AD&query_place_id=ChIJ-SzbnJo4aTQR6vu41gaM4w8
+  custom_params:
+    company: "\u661F\u91CE\u624B\u4F5C\u6599\u4EAD"
+    address: "No. 182\u865F, Chang'an St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ-SzbnJo4aTQR6vu41gaM4w8
+- url: https://www.google.com/maps/search/?api=1&query=%E6%9C%A8%E4%B8%8B%E9%A3%9F%E5%A0%82&query_place_id=ChIJ5UOpCH44aTQRA3jIePKgMNA
+  custom_params:
+    company: "\u6728\u4E0B\u98DF\u5802"
+    address: "No. 258\u865F, Cixiu Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ5UOpCH44aTQRA3jIePKgMNA
+- url: https://www.google.com/maps/search/?api=1&query=%E5%88%9D%E7%B1%B3%E7%B3%95+%EF%BC%88%E4%BB%8A%E6%97%A5%E5%B7%B2%E5%AE%8C%E5%94%AE%EF%BC%89&query_place_id=ChIJD-AtDKQ5aTQRUdDE50kCVfg
+  custom_params:
+    company: "\u521D\u7C73\u7CD5 \uFF08\u4ECA\u65E5\u5DF2\u5B8C\u552E\uFF09"
+    address: "500, Taiwan, Changhua County, Changhua City, Guangfu Rd, 143\u5DF75\u865F"
+    source: Google Maps
+    google_place_id: ChIJD-AtDKQ5aTQRUdDE50kCVfg
+- url: https://www.google.com/maps/search/?api=1&query=%E8%B1%AC%E8%88%8D%E9%A3%9F%E5%A0%82+%E7%87%92%E7%83%A4%E5%AE%9A%E9%A3%9F&query_place_id=ChIJccf0sJs4aTQRBKKGUNtqgGE
+  custom_params:
+    company: "\u8C6C\u820D\u98DF\u5802 \u71D2\u70E4\u5B9A\u98DF"
+    address: No. 364-4, Cixiu Rd, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJccf0sJs4aTQRBKKGUNtqgGE
+- url: https://www.google.com/maps/search/?api=1&query=%E5%BD%B0%E5%8C%96%E8%81%9A%E6%A8%82%E6%96%99%E7%90%86&query_place_id=ChIJl15mJoU4aTQRqy2y1E_q5Xo
+  custom_params:
+    company: "\u5F70\u5316\u805A\u6A02\u6599\u7406"
+    address: "No. 233\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJl15mJoU4aTQRqy2y1E_q5Xo
+- url: https://www.google.com/maps/search/?api=1&query=%E6%9D%B1%E9%8D%8B%E9%9F%93%E8%B6%8A%E5%B0%8F%E5%90%83&query_place_id=ChIJAbYHiUQ5aTQR2GdS8s3fYt0
+  custom_params:
+    company: "\u6771\u934B\u97D3\u8D8A\u5C0F\u5403"
+    address: "No. 92\u865F, Yongxing St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJAbYHiUQ5aTQR2GdS8s3fYt0
+- url: https://www.google.com/maps/search/?api=1&query=%E6%85%B6%E8%B1%90%E7%89%9B%E6%8E%92%E5%B0%88%E8%B3%A3%E5%BA%97&query_place_id=ChIJ69ig-404aTQRItkAJpBpdkU
+  custom_params:
+    company: "\u6176\u8C50\u725B\u6392\u5C08\u8CE3\u5E97"
+    address: No. 66, Section 1, Nanguo Rd, Changhua City, Changhua County, Taiwan
+      500
+    source: Google Maps
+    google_place_id: ChIJ69ig-404aTQRItkAJpBpdkU
+- url: https://www.google.com/maps/search/?api=1&query=%E5%BD%B0%E5%8C%96%E8%80%81%E6%8B%85%E9%98%BF%E7%92%8B%E8%82%89%E5%9C%93&query_place_id=ChIJt--jf5o4aTQR2_brMnYD--s
+  custom_params:
+    company: "\u5F70\u5316\u8001\u62C5\u963F\u748B\u8089\u5713"
+    address: "No. 144\u865F, Chang'an St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJt--jf5o4aTQR2_brMnYD--s
+- url: https://www.google.com/maps/search/?api=1&query=Vie+a+la+%E9%84%89%E9%A3%9F%E6%9D%91%E6%B4%BB+restaurant+%26+cafe&query_place_id=ChIJj__oo105aTQR5nO3f_djJfw
+  custom_params:
+    company: "Vie a la \u9109\u98DF\u6751\u6D3B restaurant & cafe"
+    address: "No. 51\u865F, Yongfu St, Changhua City, Changhua County, Taiwan 50041"
+    source: Google Maps
+    google_place_id: ChIJj__oo105aTQR5nO3f_djJfw
+- url: https://www.google.com/maps/search/?api=1&query=%E7%AB%8B%E8%BB%92%E9%96%A3%E6%96%87%E5%8C%96%E5%BB%9A%E8%8B%91&query_place_id=ChIJEUe4yzU5aTQRZCblsOcRwDU
+  custom_params:
+    company: "\u7ACB\u8ED2\u95A3\u6587\u5316\u5EDA\u82D1"
+    address: "No. 249\u865F, Chenggong Rd, Changhua City, Changhua County, Taiwan\
+      \ 500"
+    source: Google Maps
+    google_place_id: ChIJEUe4yzU5aTQRZCblsOcRwDU
+- url: https://www.google.com/maps/search/?api=1&query=%E9%9B%85%E5%85%B8%E9%82%A3%E4%B9%8B%E5%AE%B4-%E5%BD%B0%E5%8C%96%E5%BA%97&query_place_id=ChIJMaiuJ4Y4aTQRrGpwd8o1Ta0
+  custom_params:
+    company: "\u96C5\u5178\u90A3\u4E4B\u5BB4-\u5F70\u5316\u5E97"
+    address: "No. 66\u865F, Ren'ai Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJMaiuJ4Y4aTQRrGpwd8o1Ta0
+- url: https://www.google.com/maps/search/?api=1&query=%E5%90%89%E5%85%AB%E9%83%8E%E4%B8%B2%E7%87%92&query_place_id=ChIJfQSwhjw5aTQRznQ3aTwWHf0
+  custom_params:
+    company: "\u5409\u516B\u90CE\u4E32\u71D2"
+    address: "No. 318\u865F, Cixiu Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJfQSwhjw5aTQRznQ3aTwWHf0
+- url: https://www.google.com/maps/search/?api=1&query=21Plus+%E5%BD%B0%E5%8C%96%E4%B8%AD%E6%AD%A3%E5%BA%97&query_place_id=ChIJebo7Nkw5aTQRTjv_ZkuiBAM
+  custom_params:
+    company: "21Plus \u5F70\u5316\u4E2D\u6B63\u5E97"
+    address: "No. 85\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJebo7Nkw5aTQRTjv_ZkuiBAM
+- url: https://www.google.com/maps/search/?api=1&query=%E7%81%AB%E9%8D%8B%E4%B8%96%E5%AE%B6+%E5%BD%B0%E5%8C%96%E5%B0%8A%E7%88%B5%E5%BA%97&query_place_id=ChIJeR2mz-I5aTQRFquxuXM8FEg
+  custom_params:
+    company: "\u706B\u934B\u4E16\u5BB6 \u5F70\u5316\u5C0A\u7235\u5E97"
+    address: "No. 77\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJeR2mz-I5aTQRFquxuXM8FEg
+- url: https://www.google.com/maps/search/?api=1&query=%E5%BD%B0%E5%8C%96%E7%B4%A0%E9%A3%9F&query_place_id=ChIJJ87ugpA4aTQRWVFyjNaGdRc
+  custom_params:
+    company: "\u5F70\u5316\u7D20\u98DF"
+    address: No. 117, Chang'an St, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJJ87ugpA4aTQRWVFyjNaGdRc
+- url: https://www.google.com/maps/search/?api=1&query=A-Bao+house+%E6%89%8B%E4%BD%9C%E7%BE%8E%E9%A3%9F%E5%92%96%E5%95%A1%E9%A4%A8%E4%B8%AD%E6%AD%A3%E5%BA%97&query_place_id=ChIJw1u1UZU4aTQRzgpLYL5-XtY
+  custom_params:
+    company: "A-Bao house \u624B\u4F5C\u7F8E\u98DF\u5496\u5561\u9928\u4E2D\u6B63\u5E97"
+    address: "No. 90\u865F, Section 1, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJw1u1UZU4aTQRzgpLYL5-XtY
+- url: https://www.google.com/maps/search/?api=1&query=A.M.P.M.+-+Changhua&query_place_id=ChIJGTg2gNg5aTQR-_P9osi2GEE
+  custom_params:
+    company: A.M.P.M. - Changhua
+    address: "No. 148\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJGTg2gNg5aTQR-_P9osi2GEE
+- url: https://www.google.com/maps/search/?api=1&query=%E8%90%AC%E8%8A%B3%E8%9B%A4%E4%BB%94%E9%BA%B5&query_place_id=ChIJTWk_v5o4aTQR7etdLHeyqek
+  custom_params:
+    company: "\u842C\u82B3\u86E4\u4ED4\u9EB5"
+    address: No. 13, Yongxing St, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJTWk_v5o4aTQR7etdLHeyqek
+- url: https://www.google.com/maps/search/?api=1&query=A-Bao+%28Cixiu%29&query_place_id=ChIJhQm_LJo4aTQRoNw6Gplpb30
+  custom_params:
+    company: A-Bao (Cixiu)
+    address: No. 298, Cixiu Rd, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJhQm_LJo4aTQRoNw6Gplpb30
+- url: https://www.google.com/maps/search/?api=1&query=Changhua+Ashu+noodle&query_place_id=ChIJ4QTIjZo4aTQRrVmQjwy-4Jg
+  custom_params:
+    company: Changhua Ashu noodle
+    address: "No. 55\u865F, Yongxing St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ4QTIjZo4aTQRrVmQjwy-4Jg
+- url: https://www.google.com/maps/search/?api=1&query=%E9%98%BF%E8%BC%9D%E9%99%BD%E6%98%A5%E9%BA%B5&query_place_id=ChIJX0Mtipo4aTQRPBxGuyYInWw
+  custom_params:
+    company: "\u963F\u8F1D\u967D\u6625\u9EB5"
+    address: No. 73, Yongxing St, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJX0Mtipo4aTQRPBxGuyYInWw
+- url: https://www.google.com/maps/search/?api=1&query=%E8%B2%93%E9%BC%A0%E9%BA%B5&query_place_id=ChIJ0_J2h5o4aTQR5eIO1yVk2Hc
+  custom_params:
+    company: "\u8C93\u9F20\u9EB5"
+    address: No. 223, Chenleng Rd, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJ0_J2h5o4aTQR5eIO1yVk2Hc
+- url: https://www.google.com/maps/search/?api=1&query=%E6%AD%A3%E5%AE%97%E7%B4%85%E7%87%92%E5%8E%9F%E6%B1%81%E7%89%9B%E8%82%89%E9%BA%B5&query_place_id=ChIJFe3vpJA4aTQR2ubfsXzfTvU
+  custom_params:
+    company: "\u6B63\u5B97\u7D05\u71D2\u539F\u6C41\u725B\u8089\u9EB5"
+    address: No. 61, Chang'an St, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJFe3vpJA4aTQR2ubfsXzfTvU
+- url: https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E5%8E%9F%E8%92%B8%E9%A4%83%EF%BC%88%E6%B0%B8%E8%88%88%E5%BA%97%EF%BC%89&query_place_id=ChIJ-5h0iZo4aTQR6rvxGd76iE4
+  custom_params:
+    company: "\u5927\u539F\u84B8\u9903\uFF08\u6C38\u8208\u5E97\uFF09"
+    address: "No. 76-2\u865F, Yongxing St, Changhua City, Changhua County, Taiwan\
+      \ 500"
+    source: Google Maps
+    google_place_id: ChIJ-5h0iZo4aTQR6rvxGd76iE4
+- url: https://www.google.com/maps/search/?api=1&query=%E8%80%81%E7%89%8C%E9%98%BF%E7%AB%A0%E8%82%89%E5%9C%93&query_place_id=ChIJt--jf5o4aTQRhGg2mAQe9eI
+  custom_params:
+    company: "\u8001\u724C\u963F\u7AE0\u8089\u5713"
+    address: "No. 128\u865F, Chang'an St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJt--jf5o4aTQRhGg2mAQe9eI
+- url: https://www.google.com/maps/search/?api=1&query=Burger+King+%28Changhua%29&query_place_id=ChIJ6WAG8tc5aTQR6H3gsiufSQg
+  custom_params:
+    company: Burger King (Changhua)
+    address: "500, Taiwan, Changhua County, Changhua City, Section 2, Zhongshan Rd,\
+      \ 521\u865F1\u6A13"
+    source: Google Maps
+    google_place_id: ChIJ6WAG8tc5aTQR6H3gsiufSQg
+- url: https://www.google.com/maps/search/?api=1&query=%E9%87%8D%E6%85%B6%E9%85%B8%E8%BE%A3%E7%B2%89+%E5%BD%B0%E5%8C%96%E4%B8%AD%E6%AD%A3%E5%BA%97%EF%BC%883%E6%9C%889%E6%97%A5%E8%87%A8%E6%99%82%E5%85%AC%E4%BC%91%EF%BC%89&query_place_id=ChIJvxGGOo85aTQRbJ9xYo7HT_Q
+  custom_params:
+    company: "\u91CD\u6176\u9178\u8FA3\u7C89 \u5F70\u5316\u4E2D\u6B63\u5E97\uFF08\
+      3\u67089\u65E5\u81E8\u6642\u516C\u4F11\uFF09"
+    address: "No. 211\u865F, Section 1, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJvxGGOo85aTQRbJ9xYo7HT_Q
+- url: https://www.google.com/maps/search/?api=1&query=%E5%8D%81%E5%8F%A3%E6%9C%88+%E7%A9%B6%E9%A3%9F%E6%96%B9&query_place_id=ChIJjxKVd3E5aTQRFi-G5txsyG4
+  custom_params:
+    company: "\u5341\u53E3\u6708 \u7A76\u98DF\u65B9"
+    address: "No. 223\u865F, Sanfu St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJjxKVd3E5aTQRFi-G5txsyG4
+- url: https://www.google.com/maps/search/?api=1&query=%E9%A6%99%E8%93%AE%E8%B6%8A%E5%8D%97%E6%96%99%E7%90%86&query_place_id=ChIJa0M-37E5aTQRbAWuTwmRTw0
+  custom_params:
+    company: "\u9999\u84EE\u8D8A\u5357\u6599\u7406"
+    address: "No. 261\u865F, Section 1, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJa0M-37E5aTQRbAWuTwmRTw0
+- url: https://www.google.com/maps/search/?api=1&query=Sokoso+Cafe%E6%89%8B%E5%8B%BE%E6%89%8B%E5%92%96%E5%95%A1&query_place_id=ChIJG_DJRo44aTQRJ0NnEMKeKx8
+  custom_params:
+    company: "Sokoso Cafe\u624B\u52FE\u624B\u5496\u5561"
+    address: "No. 9\u865F, Huashan Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJG_DJRo44aTQRJ0NnEMKeKx8
+- url: https://www.google.com/maps/search/?api=1&query=T.K.K.+Fried+Chicken&query_place_id=ChIJ3aAFrJA4aTQRBt68vWMypgg
+  custom_params:
+    company: T.K.K. Fried Chicken
+    address: No. 557, Section 1, Zhongzheng Rd, Changhua City, Changhua County, Taiwan
+      500
+    source: Google Maps
+    google_place_id: ChIJ3aAFrJA4aTQRBt68vWMypgg
+- url: https://www.google.com/maps/search/?api=1&query=%E5%92%96%E5%96%B1%E5%A4%A7%E5%8F%94+%E5%8F%83%E8%99%9F%E5%BA%97&query_place_id=ChIJqwXfdu05aTQRcd_6f7W-2Fc
+  custom_params:
+    company: "\u5496\u55B1\u5927\u53D4 \u53C3\u865F\u5E97"
+    address: "No. 52-1\u865F, Shijian Rd, Changhua City, Changhua County, Taiwan 50044"
+    source: Google Maps
+    google_place_id: ChIJqwXfdu05aTQRcd_6f7W-2Fc
+- url: https://www.google.com/maps/search/?api=1&query=%E5%AF%B6%E5%AF%B6%E6%B0%B4%E7%85%8E%E5%8C%85&query_place_id=ChIJGTlAZkE5aTQR76-Hup3IKmk
+  custom_params:
+    company: "\u5BF6\u5BF6\u6C34\u714E\u5305"
+    address: "No. 52\u865F, Gongxiao St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJGTlAZkE5aTQR76-Hup3IKmk
+- url: https://www.google.com/maps/search/?api=1&query=%E7%82%8E%E7%94%9F%E5%92%96%E5%95%A1YANSHENG+CAFF%C3%88%EF%BC%88%E6%81%95%E7%84%A1%E9%A0%90%E7%B4%84%E6%9C%8D%E5%8B%99%EF%BC%89&query_place_id=ChIJSbEESIA4aTQRhR-0rlihgGM
+  custom_params:
+    company: "\u708E\u751F\u5496\u5561YANSHENG CAFF\xC8\uFF08\u6055\u7121\u9810\u7D04\
+      \u670D\u52D9\uFF09"
+    address: "No. 11\u865F, Jianwen St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJSbEESIA4aTQRhR-0rlihgGM
+- url: https://www.google.com/maps/search/?api=1&query=NU+PASTA%E5%BD%B0%E5%8C%96%E5%AF%A6%E8%B8%90%E5%BA%97%EF%BC%8A%E7%BE%A9%E5%BC%8F%E9%A4%90%E5%BB%B3%EF%BC%88ltalian+restaurant%EF%BC%89%2F%E7%BE%A9%E5%A4%A7%E5%88%A9%E9%BA%B5%2F%E5%8D%83%E5%B1%A4%EF%BC%86%E7%BE%85%E9%A6%AC%E6%8A%AB%E8%96%A9%2F%E7%87%89%E9%A3%AF%2F%E7%84%97%E7%83%A4%2F%E7%89%B9%E7%B4%84%E5%95%86%2F%E5%8C%85%E5%A0%B4%E6%B4%BB%E5%8B%95%E8%81%9A%E9%A4%90%2F%E4%B8%8D%E9%99%90%E6%99%82%E8%81%9A%E9%A4%90%2FTaiwan+Pay%26Cash%EF%BC%86%E5%88%B7%E5%8D%A1&query_place_id=ChIJv3uWY-o4aTQRsvmBHK0Q7lo
+  custom_params:
+    company: "NU PASTA\u5F70\u5316\u5BE6\u8E10\u5E97\uFF0A\u7FA9\u5F0F\u9910\u5EF3\
+      \uFF08ltalian restaurant\uFF09/\u7FA9\u5927\u5229\u9EB5/\u5343\u5C64\uFF06\u7F85\
+      \u99AC\u62AB\u85A9/\u71C9\u98EF/\u7117\u70E4/\u7279\u7D04\u5546/\u5305\u5834\
+      \u6D3B\u52D5\u805A\u9910/\u4E0D\u9650\u6642\u805A\u9910/Taiwan Pay&Cash\uFF06\
+      \u5237\u5361"
+    address: "No. 46\u865F, Shijian Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJv3uWY-o4aTQRsvmBHK0Q7lo
+- url: https://www.google.com/maps/search/?api=1&query=Yan+Cafe&query_place_id=ChIJW1voZPk5aTQR0gXf930OBzo
+  custom_params:
+    company: Yan Cafe
+    address: "No. 199\u865F, Yongle St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJW1voZPk5aTQR0gXf930OBzo
+- url: https://www.google.com/maps/search/?api=1&query=Pizza+Rock+%E6%90%96%E6%BB%BE%E6%8A%AB%E8%96%A9%E5%BD%B0%E5%8C%96%E5%BA%97+Changhua&query_place_id=ChIJUVZg1Jo4aTQRxEN7ny7CLEQ
+  custom_params:
+    company: "Pizza Rock \u6416\u6EFE\u62AB\u85A9\u5F70\u5316\u5E97 Changhua"
+    address: "No. 214\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJUVZg1Jo4aTQRxEN7ny7CLEQ
+- url: https://www.google.com/maps/search/?api=1&query=%E6%AD%A3%E6%9A%89%E7%B4%A0%E9%A3%9F-%E6%89%8B%E5%81%9A%E6%8D%B2%E9%A4%85%EF%BD%9C%E6%8A%93%E9%A4%85%EF%BD%9C%E9%BA%B5%E7%B7%9A%E7%B3%8A&query_place_id=ChIJrQyzRjY5aTQROsWDZA9UmR8
+  custom_params:
+    company: "\u6B63\u6689\u7D20\u98DF-\u624B\u505A\u6372\u9905\uFF5C\u6293\u9905\uFF5C\
+      \u9EB5\u7DDA\u7CCA"
+    address: "No. 77\u865F, Lane 121, Section 3, Zhongshan Rd, Changhua City, Changhua\
+      \ County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJrQyzRjY5aTQROsWDZA9UmR8
+- url: https://www.google.com/maps/search/?api=1&query=LeeLi%27s&query_place_id=ChIJV2ve_v1FaTQR-f0DBh454Dg
+  custom_params:
+    company: LeeLi's
+    address: "505, Taiwan, Changhua County, Lukang Township, Xinghua St, 40-1\u865F\
+      \u865F 50569"
+    source: Google Maps
+    google_place_id: ChIJV2ve_v1FaTQR-f0DBh454Dg
+- url: https://www.google.com/maps/search/?api=1&query=%E9%98%BF%E4%B8%89%E7%88%8C%E8%82%89%E9%A3%AF&query_place_id=ChIJM67O8bk4aTQRjAETVuAK8iY
+  custom_params:
+    company: "\u963F\u4E09\u720C\u8089\u98EF"
+    address: "No. 153\u865F, Section 2, Jinma Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJM67O8bk4aTQRjAETVuAK8iY
+- url: https://www.google.com/maps/search/?api=1&query=%E9%B4%A8%E8%82%89%E9%A3%AF&query_place_id=ChIJz3iAisE4aTQRitB_dUAF0SQ
+  custom_params:
+    company: "\u9D28\u8089\u98EF"
+    address: "No. 138\u865F, Section 3, Zhongshan Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJz3iAisE4aTQRitB_dUAF0SQ
+- url: https://www.google.com/maps/search/?api=1&query=%E9%98%BF%E7%BE%8E%E7%87%92%E7%83%A4&query_place_id=ChIJF5wfkpo4aTQRedPSZxRu3XA
+  custom_params:
+    company: "\u963F\u7F8E\u71D2\u70E4"
+    address: No. 50, Yongxing St, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJF5wfkpo4aTQRedPSZxRu3XA
+- url: https://www.google.com/maps/search/?api=1&query=McDonald%27s&query_place_id=ChIJHQjk_Hw4aTQRGqJ_Su2eE3c
+  custom_params:
+    company: McDonald's
+    address: "500, Taiwan, Changhua County, Changhua City, Section 1, Zhongzheng Rd,\
+      \ 566\u865F1\u6A13"
+    source: Google Maps
+    google_place_id: ChIJHQjk_Hw4aTQRGqJ_Su2eE3c
+- url: https://www.google.com/maps/search/?api=1&query=%E7%B3%AF%E7%B1%B3%E7%8E%89%E7%B1%B3&query_place_id=ChIJR-i5opA4aTQRw3L8u0k0K10
+  custom_params:
+    company: "\u7CEF\u7C73\u7389\u7C73"
+    address: "No. 144\u865F, Guangfu Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJR-i5opA4aTQRw3L8u0k0K10
+- url: https://www.google.com/maps/search/?api=1&query=%E7%96%84%E6%9C%A8%E9%B9%B9%E9%85%A5%E9%9B%9E&query_place_id=ChIJfdZ5JZc4aTQRxPT_MpqlzZ4
+  custom_params:
+    company: "\u7584\u6728\u9E79\u9165\u96DE"
+    address: "No. 313\u865F, Minsheng Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJfdZ5JZc4aTQRxPT_MpqlzZ4
+- url: https://www.google.com/maps/search/?api=1&query=6owl+door+Changhua+Xiaoyang+Branch&query_place_id=ChIJSxPN8sA5aTQRNFzq_lN8dpI
+  custom_params:
+    company: 6owl door Changhua Xiaoyang Branch
+    address: "No. 59\u865F, Xiaoyang Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJSxPN8sA5aTQRNFzq_lN8dpI
+- url: https://www.google.com/maps/search/?api=1&query=%E6%9D%B1%E8%B4%8F%E6%97%A5%E5%BC%8F%E6%B5%B7%E7%94%A3%E6%96%99%E7%90%86&query_place_id=ChIJyfiJppc4aTQRKCKbYm3Ic4M
+  custom_params:
+    company: "\u6771\u8D0F\u65E5\u5F0F\u6D77\u7523\u6599\u7406"
+    address: "No. 38-1\u865F, Section 3, Jinma Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJyfiJppc4aTQRKCKbYm3Ic4M
+- url: https://www.google.com/maps/search/?api=1&query=%E9%99%B3%E5%AE%B6%E5%8F%B0%E5%8D%97%E8%99%B1%E7%9B%AE%E9%AD%9A%E8%82%89%E7%87%A5%E9%A3%AF&query_place_id=ChIJ92DByGE5aTQR-HnMGb3H_o0
+  custom_params:
+    company: "\u9673\u5BB6\u53F0\u5357\u8671\u76EE\u9B5A\u8089\u71E5\u98EF"
+    address: "No. 102\u865F, Section 1, Zhangmei Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ92DByGE5aTQR-HnMGb3H_o0
+- url: https://www.google.com/maps/search/?api=1&query=%E5%8C%97%E9%96%80%E5%8F%A3%E8%82%89%E5%9C%93&query_place_id=ChIJqSpFN5c4aTQRGqOqGvaKPgw
+  custom_params:
+    company: "\u5317\u9580\u53E3\u8089\u5713"
+    address: "No. 494\u865F, Section 1, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJqSpFN5c4aTQRGqOqGvaKPgw
+- url: https://www.google.com/maps/search/?api=1&query=%E5%B1%81%E6%A0%BC%E8%B1%AC%E7%81%AB%E9%8D%8B%E9%A4%90%E5%BB%B3%C2%B7%E8%A6%AA%E5%AD%90%E6%A8%82%E5%9C%92&query_place_id=ChIJ3Y96MAw5aTQRoZRcDEPkBqo
+  custom_params:
+    company: "\u5C41\u683C\u8C6C\u706B\u934B\u9910\u5EF3\xB7\u89AA\u5B50\u6A02\u5712"
+    address: "No. 298\u865F, Section 3, Jinma Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ3Y96MAw5aTQRoZRcDEPkBqo
+- url: https://www.google.com/maps/search/?api=1&query=%E5%85%AD%E6%9C%AC%E6%9C%A8%E9%8D%8B%E7%89%A9%E9%A3%9F%E5%A0%82+-+%E5%BD%B0%E5%8C%96+%E4%BA%BA%E6%B0%A3%E7%81%AB%E9%8D%8B%E8%81%9A%E9%A4%90%E9%A4%90%E5%BB%B3+%E5%BF%85%E5%90%83%E7%A7%98%E8%A3%BD%E9%BA%BB%E8%BE%A3%E9%8D%8B+%E7%89%9B%E5%A5%B6%E9%8D%8B%E7%89%B9%E8%89%B2%E6%B9%AF%E5%BA%95+%E9%AB%98CP%E5%80%BC%E5%80%8B%E4%BA%BA%E9%8D%8B+%E9%9C%B8%E7%8E%8B%E9%BE%8D%E8%9D%A6+%E6%B5%B7%E9%99%B8%E9%8D%8B%E9%9B%99%E4%BA%BA%E5%A5%97%E9%A4%90%E9%A6%96%E9%81%B8+%E5%B9%B3%E5%83%B9%E5%95%86%E6%A5%AD%E5%8D%88%E9%A4%90+%E5%B8%82%E5%8D%80%E5%95%86%E5%9C%88%E6%8E%92%E9%9A%8A%E7%BE%8E%E9%A3%9F+PTT%E6%8E%A8%E8%96%A6&query_place_id=ChIJQ0wY-o04aTQRoHYrHQ839gQ
+  custom_params:
+    company: "\u516D\u672C\u6728\u934B\u7269\u98DF\u5802 - \u5F70\u5316 \u4EBA\u6C23\
+      \u706B\u934B\u805A\u9910\u9910\u5EF3 \u5FC5\u5403\u79D8\u88FD\u9EBB\u8FA3\u934B\
+      \ \u725B\u5976\u934B\u7279\u8272\u6E6F\u5E95 \u9AD8CP\u503C\u500B\u4EBA\u934B\
+      \ \u9738\u738B\u9F8D\u8766 \u6D77\u9678\u934B\u96D9\u4EBA\u5957\u9910\u9996\u9078\
+      \ \u5E73\u50F9\u5546\u696D\u5348\u9910 \u5E02\u5340\u5546\u5708\u6392\u968A\u7F8E\
+      \u98DF PTT\u63A8\u85A6"
+    address: "No. 76\u865F, Section 1, Nanguo Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJQ0wY-o04aTQRoHYrHQ839gQ
+- url: https://www.google.com/maps/search/?api=1&query=%E4%B8%8D%E6%99%82%E4%B8%8D%E9%A3%9F%E6%B8%85%E9%8D%8B%E7%89%A9&query_place_id=ChIJ2X8rGJ04aTQRb0vsNBN4RBI
+  custom_params:
+    company: "\u4E0D\u6642\u4E0D\u98DF\u6E05\u934B\u7269"
+    address: "No. 441\u865F, Section 3, Jinma Rd, Changhua City, Changhua County,\
+      \ Taiwan 50067"
+    source: Google Maps
+    google_place_id: ChIJ2X8rGJ04aTQRb0vsNBN4RBI
+- url: https://www.google.com/maps/search/?api=1&query=HOUSE+V+%E5%A5%BD%E5%AE%A4%E9%8D%8B%E7%89%A9-%E5%BD%B0%E5%8C%96%E5%BA%97%EF%BC%8821%3A30%E6%9C%80%E5%BE%8C%E9%BB%9E%E9%A4%90%E6%99%82%E9%96%93%EF%BC%89&query_place_id=ChIJw6aHLZ05aTQR18w7GNbjlXo
+  custom_params:
+    company: "HOUSE V \u597D\u5BA4\u934B\u7269-\u5F70\u5316\u5E97\uFF0821:30\u6700\
+      \u5F8C\u9EDE\u9910\u6642\u9593\uFF09"
+    address: "No. 68-1\u865F, Section 1, Zhangxin Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJw6aHLZ05aTQR18w7GNbjlXo
+- url: https://www.google.com/maps/search/?api=1&query=%E9%9B%81%E6%AD%B8_%E9%9B%9E%E6%B9%AF%E6%8B%89%E9%BA%B5%E5%BA%97&query_place_id=ChIJQ4dHiOk5aTQRGazUfuIwdCE
+  custom_params:
+    company: "\u96C1\u6B78_\u96DE\u6E6F\u62C9\u9EB5\u5E97"
+    address: "50046, Taiwan, Changhua County, Changhua City, Yongle St, 187\u865F\
+      1\u6A13"
+    source: Google Maps
+    google_place_id: ChIJQ4dHiOk5aTQRGazUfuIwdCE
+- url: https://www.google.com/maps/search/?api=1&query=%E4%BE%9D%E8%88%8A%E7%87%92%E8%82%89&query_place_id=ChIJu1jc7mA5aTQRpAFFmTLvIfA
+  custom_params:
+    company: "\u4F9D\u820A\u71D2\u8089"
+    address: "No. 93\u865F, Minsheng Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJu1jc7mA5aTQRpAFFmTLvIfA
+- url: https://www.google.com/maps/search/?api=1&query=%E5%AE%AE%E6%9C%AC%E6%AD%A6%E4%B8%BC+%E5%BD%B0%E5%8C%96%E6%B0%91%E6%AC%8A%E3%80%8A%E6%97%A5%E6%96%99%E7%BE%8E%E9%A3%9F%E3%80%8B%E6%97%A5%E5%BC%8F%E5%AE%9A%E9%A3%9F%EF%BD%9C%E6%97%A5%E5%BC%8F%E4%BE%BF%E7%95%B6%EF%BD%9C%E9%A4%90%E7%9B%92%E5%A4%96%E9%80%81%EF%BD%9C%E5%B9%B3%E5%83%B9%E7%89%B9%E8%89%B2%EF%BD%9C%E4%BA%BA%E6%B0%A3%E4%B8%BC%E9%A3%AF%EF%BD%9C%E7%86%B1%E9%96%80%E6%97%A5%E6%96%99%EF%BD%9C%E7%89%B9%E8%89%B2%E4%B8%BC%E9%A3%AF&query_place_id=ChIJMSOd0484aTQRzfSaQmU9Px0
+  custom_params:
+    company: "\u5BAE\u672C\u6B66\u4E3C \u5F70\u5316\u6C11\u6B0A\u300A\u65E5\u6599\u7F8E\
+      \u98DF\u300B\u65E5\u5F0F\u5B9A\u98DF\uFF5C\u65E5\u5F0F\u4FBF\u7576\uFF5C\u9910\
+      \u76D2\u5916\u9001\uFF5C\u5E73\u50F9\u7279\u8272\uFF5C\u4EBA\u6C23\u4E3C\u98EF\
+      \uFF5C\u71B1\u9580\u65E5\u6599\uFF5C\u7279\u8272\u4E3C\u98EF"
+    address: "No. 50\u865F, Minquan Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJMSOd0484aTQRzfSaQmU9Px0
+- url: https://www.google.com/maps/search/?api=1&query=%E6%BD%AE%E6%A5%B5%E8%94%AC%EF%BD%9C%E5%BD%B0%E5%8C%96%E7%86%B1%E9%96%80%E6%8E%A8%E8%96%A6%EF%BD%9C%E8%94%AC%E9%A3%9F%E6%96%99%E7%90%86%EF%BD%9C%E7%81%AB%E9%8D%8B%EF%BD%9C%E5%AE%9A%E9%A3%9F&query_place_id=ChIJG7eYWFs5aTQRTN8WW85U5_I
+  custom_params:
+    company: "\u6F6E\u6975\u852C\uFF5C\u5F70\u5316\u71B1\u9580\u63A8\u85A6\uFF5C\u852C\
+      \u98DF\u6599\u7406\uFF5C\u706B\u934B\uFF5C\u5B9A\u98DF"
+    address: "No. 145\u865F, Ziqiang Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJG7eYWFs5aTQRTN8WW85U5_I
+- url: https://www.google.com/maps/search/?api=1&query=%E7%BF%94%E5%AE%9A%E9%A3%9F&query_place_id=ChIJ5y95Uok4aTQRWdTcKYLZeDM
+  custom_params:
+    company: "\u7FD4\u5B9A\u98DF"
+    address: "No. 70\u865F, Bo'ai St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ5y95Uok4aTQRWdTcKYLZeDM
+- url: https://www.google.com/maps/search/?api=1&query=%E7%9F%AE%E5%AD%90%E5%92%96%E5%93%A9+%E3%82%AB%E3%83%AC%E3%83%BC%E3%83%A9%E3%82%A4%E3%82%B9%E5%B0%88%E9%96%80%E5%BA%97&query_place_id=ChIJOef2FzE5aTQR0L9-8-1f02c
+  custom_params:
+    company: "\u77EE\u5B50\u5496\u54E9 \u30AB\u30EC\u30FC\u30E9\u30A4\u30B9\u5C08\u9580\
+      \u5E97"
+    address: "No. 136\u865F, Taiping St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJOef2FzE5aTQR0L9-8-1f02c
+- url: https://www.google.com/maps/search/?api=1&query=Iron+pasta+house&query_place_id=ChIJoSPHcps4aTQRDRoq_yhJFhA
+  custom_params:
+    company: Iron pasta house
+    address: No. 438-3, Cixiu Rd, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJoSPHcps4aTQRDRoq_yhJFhA
+- url: https://www.google.com/maps/search/?api=1&query=%E9%AD%9A%E5%B8%82%E5%A0%B4%E7%88%8C%E8%82%89%E9%A3%AF&query_place_id=ChIJjwEq4oQ4aTQRhtZ5kxv-lwc
+  custom_params:
+    company: "\u9B5A\u5E02\u5834\u720C\u8089\u98EF"
+    address: "No. 320\u865F, Section 2, Zhongzheng Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJjwEq4oQ4aTQRhtZ5kxv-lwc
+- url: https://www.google.com/maps/search/?api=1&query=Niu+Shan+Beef+Noodle+Restaurant&query_place_id=ChIJyYw8YnQ5aTQRRV0tpG8_6DQ
+  custom_params:
+    company: Niu Shan Beef Noodle Restaurant
+    address: "500, Taiwan, Changhua County, Changhua City, Lane 22, Ziqiang S Rd,\
+      \ 75-8\u865F1 \u6A13"
+    source: Google Maps
+    google_place_id: ChIJyYw8YnQ5aTQRRV0tpG8_6DQ
+- url: https://www.google.com/maps/search/?api=1&query=%E4%BB%81%E4%B9%8B%E5%88%9D+%E5%8C%97%E6%B5%B7%E9%81%93%E6%B9%AF%E5%92%96%E5%96%B1%E5%B0%88%E8%B3%A3%EF%BC%88%E5%BD%B0%E5%8C%96%E5%BA%97%EF%BC%89&query_place_id=ChIJBSrzqlM5aTQRqMDHUVqWyXI
+  custom_params:
+    company: "\u4EC1\u4E4B\u521D \u5317\u6D77\u9053\u6E6F\u5496\u55B1\u5C08\u8CE3\uFF08\
+      \u5F70\u5316\u5E97\uFF09"
+    address: "No. 76\u865F, Minquan Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJBSrzqlM5aTQRqMDHUVqWyXI
+- url: https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E5%B4%8E%E9%A3%9F%E5%A0%82%E6%97%A5%E5%BC%8F%E6%89%8B%E4%BD%9C%E3%82%8A%E6%96%99%E7%90%86&query_place_id=ChIJVfDLOfo5aTQRZypnkaMKDhY
+  custom_params:
+    company: "\u5C71\u5D0E\u98DF\u5802\u65E5\u5F0F\u624B\u4F5C\u308A\u6599\u7406"
+    address: "No. 59\u865F, Yonghua St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJVfDLOfo5aTQRZypnkaMKDhY
+- url: https://www.google.com/maps/search/?api=1&query=%E5%92%96%E5%A1%8A%E8%82%89%E6%97%A5%E5%BC%8F%E6%AD%90%E5%A7%86%E8%9B%8B%E5%92%96%E5%93%A9%E9%A3%AF&query_place_id=ChIJT5NboLFHaTQRbmIv91P87_Q
+  custom_params:
+    company: "\u5496\u584A\u8089\u65E5\u5F0F\u6B50\u59C6\u86CB\u5496\u54E9\u98EF"
+    address: "No. 54\u4E4B2\u865F, Zhangxing St, Changhua City, Changhua County, Taiwan\
+      \ 500"
+    source: Google Maps
+    google_place_id: ChIJT5NboLFHaTQRbmIv91P87_Q
+- url: https://www.google.com/maps/search/?api=1&query=%E4%B8%80%E9%A1%86%E9%A3%AF%E7%B3%B0&query_place_id=ChIJsUK_Mx85aTQRLtNhFnPPqyM
+  custom_params:
+    company: "\u4E00\u9846\u98EF\u7CF0"
+    address: "No. 292\u865F, Minsheng Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJsUK_Mx85aTQRLtNhFnPPqyM
+- url: https://www.google.com/maps/search/?api=1&query=%E7%A7%81%E6%88%BF%E6%B3%B0%28%E5%BD%B0%E5%8C%96%E5%BA%97%29&query_place_id=ChIJbXzMapE4aTQRbBUJeQndGGU
+  custom_params:
+    company: "\u79C1\u623F\u6CF0(\u5F70\u5316\u5E97)"
+    address: "No. 53\u865F, Yongfu St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJbXzMapE4aTQRbBUJeQndGGU
+- url: https://www.google.com/maps/search/?api=1&query=%E7%A7%81%E6%88%BF%E8%8F%9C%E5%89%B5%E6%84%8F%E6%96%99%E7%90%86&query_place_id=ChIJZc8ii5o4aTQRrSN1tqS_304
+  custom_params:
+    company: "\u79C1\u623F\u83DC\u5275\u610F\u6599\u7406"
+    address: No. 418, Minzu Rd, Changhua City, Changhua County, Taiwan 500
+    source: Google Maps
+    google_place_id: ChIJZc8ii5o4aTQRrSN1tqS_304
+- url: https://www.google.com/maps/search/?api=1&query=%E9%98%BF%E6%B3%89%E7%88%8C%E8%82%89%E9%A3%AF&query_place_id=ChIJW9I93pA4aTQR3qef2kWPv8Q
+  custom_params:
+    company: "\u963F\u6CC9\u720C\u8089\u98EF"
+    address: "No. 216\u865F, Chenggong Rd, Changhua City, Changhua County, Taiwan\
+      \ 500"
+    source: Google Maps
+    google_place_id: ChIJW9I93pA4aTQR3qef2kWPv8Q
+- url: https://www.google.com/maps/search/?api=1&query=%E5%9F%8E%E4%B8%AD%E8%A1%97%E4%B8%80%E8%99%9F+%E5%92%96%E5%95%A1%E7%B0%A1%E9%A4%90%E8%97%9D%E6%96%87%E7%A9%BA%E9%96%93&query_place_id=ChIJhXLxRyc5aTQRFAqx5nfptwI
+  custom_params:
+    company: "\u57CE\u4E2D\u8857\u4E00\u865F \u5496\u5561\u7C21\u9910\u85DD\u6587\u7A7A\
+      \u9593"
+    address: "No. 1\u865F, Chengzhong St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJhXLxRyc5aTQRFAqx5nfptwI
+- url: https://www.google.com/maps/search/?api=1&query=Time+to+Eat&query_place_id=ChIJz1bDqwI5aTQRw1ycaJrGcG4
+  custom_params:
+    company: Time to Eat
+    address: "No. 15\u865F, Lane 273, Huashan Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJz1bDqwI5aTQRw1ycaJrGcG4
+- url: https://www.google.com/maps/search/?api=1&query=%E4%BD%A0%E5%A5%BD%E7%BE%A9%E5%BC%8F&query_place_id=ChIJB_ZdTAE5aTQRZASXKPNb_Lk
+  custom_params:
+    company: "\u4F60\u597D\u7FA9\u5F0F"
+    address: "No. 80\u865F, Section 1, Nanguo Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJB_ZdTAE5aTQRZASXKPNb_Lk
+- url: https://www.google.com/maps/search/?api=1&query=%E5%B0%8F%E9%A4%90%E9%A4%A8+Steak+Bistro&query_place_id=ChIJy0M-JKM4aTQR1ffsx11m22Q
+  custom_params:
+    company: "\u5C0F\u9910\u9928 Steak Bistro"
+    address: "500No. 73\u865F, Section 1, Zhangxin Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJy0M-JKM4aTQR1ffsx11m22Q
+- url: https://www.google.com/maps/search/?api=1&query=%E4%B8%80%E9%87%8C%E6%9A%AE&query_place_id=ChIJhxf2kqw5aTQRhLwFafCvxVU
+  custom_params:
+    company: "\u4E00\u91CC\u66AE"
+    address: "No. 149\u865F, Huashan Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJhxf2kqw5aTQRhLwFafCvxVU
+- url: https://www.google.com/maps/search/?api=1&query=%E8%BE%B2%E9%A3%9F%E6%86%B6%E6%96%99%E7%90%86%E5%9D%8A&query_place_id=ChIJ68jjFqg5aTQRFFeB6NOiWl8
+  custom_params:
+    company: "\u8FB2\u98DF\u61B6\u6599\u7406\u574A"
+    address: "No. 259\u865F, Nanyao Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ68jjFqg5aTQRFFeB6NOiWl8
+- url: https://www.google.com/maps/search/?api=1&query=%E5%9B%9B%E4%BA%94%E7%95%AA%E9%A3%9F%E5%A0%82%EF%BC%88%E5%8D%97%E9%96%80%E5%B8%82%E5%A0%B4%EF%BC%89&query_place_id=ChIJBxcZv645aTQRCZAypxfrTN8
+  custom_params:
+    company: "\u56DB\u4E94\u756A\u98DF\u5802\uFF08\u5357\u9580\u5E02\u5834\uFF09"
+    address: "No. 503\u865F, Minzu Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJBxcZv645aTQRCZAypxfrTN8
+- url: https://www.google.com/maps/search/?api=1&query=%E5%B3%BD%E8%B0%B7%E6%BC%A2%E5%A0%A1+Gorge+Burgers&query_place_id=ChIJ9UzjFhI5aTQR1VAX6bTmVYM
+  custom_params:
+    company: "\u5CFD\u8C37\u6F22\u5821 Gorge Burgers"
+    address: "No. 116\u865F, Chenggong Rd, Changhua City, Changhua County, Taiwan\
+      \ 500"
+    source: Google Maps
+    google_place_id: ChIJ9UzjFhI5aTQR1VAX6bTmVYM
+- url: https://www.google.com/maps/search/?api=1&query=%E9%B0%BB%E3%81%AE%E5%B9%B8&query_place_id=ChIJz8j4qgY5aTQRXFsQVf4jG18
+  custom_params:
+    company: "\u9C3B\u306E\u5E78"
+    address: "No. 4-1\u865F, Lane 314, Nanyao Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJz8j4qgY5aTQRXFsQVf4jG18
+- url: https://www.google.com/maps/search/?api=1&query=%E4%BA%8C%E7%94%B7%E5%B1%85%E9%85%92%E9%A3%9F%E4%BA%8B%E6%89%80&query_place_id=ChIJuW9L7IM5aTQRl0Fcov2Sp34
+  custom_params:
+    company: "\u4E8C\u7537\u5C45\u9152\u98DF\u4E8B\u6240"
+    address: "No. 181\u865F, Yongle St, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJuW9L7IM5aTQRl0Fcov2Sp34
+- url: https://www.google.com/maps/search/?api=1&query=Noki+%E6%B4%8B%E5%92%8C%E9%A3%9F&query_place_id=ChIJP7xt6Ac5aTQRNiNjrO3QiFE
+  custom_params:
+    company: "Noki \u6D0B\u548C\u98DF"
+    address: "No. 323\u865F, Chenggong Rd, Changhua City, Changhua County, Taiwan\
+      \ 500"
+    source: Google Maps
+    google_place_id: ChIJP7xt6Ac5aTQRNiNjrO3QiFE
+- url: https://www.google.com/maps/search/?api=1&query=%E6%AD%B2%E6%9C%88%E9%9D%9C%E5%A5%BD&query_place_id=ChIJ3eFo75U5aTQRytucel8Y6uo
+  custom_params:
+    company: "\u6B72\u6708\u975C\u597D"
+    address: "No. 112\u865F, Cixiu N Rd, Changhua City, Changhua County, Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJ3eFo75U5aTQRytucel8Y6uo
+- url: https://www.google.com/maps/search/?api=1&query=%E6%B7%B1YA%E9%A3%9F%E5%A0%82&query_place_id=ChIJbTQ2i544aTQRNs_uHQNGFcQ
+  custom_params:
+    company: "\u6DF1YA\u98DF\u5802"
+    address: "No. 512\u865F, Section 3, Jinma Rd, Changhua City, Changhua County,\
+      \ Taiwan 500"
+    source: Google Maps
+    google_place_id: ChIJbTQ2i544aTQRNs_uHQNGFcQ
+- url: https://www.google.com/maps/search/?api=1&query=%E4%B8%B9%E9%9B%B2%E5%B0%8F%E9%A4%90%E9%A4%A8+%E4%B8%AD%E5%BC%8F%E5%B0%8F%E7%82%92+-%E5%BD%B0%E5%8C%96%E5%8D%88%E9%A4%90%E9%A6%96%E9%81%B8%7C%E5%B9%B3%E5%83%B9%E5%8D%88%E9%A4%90%7C%E6%8E%A8%E8%96%A6%E6%99%9A%E9%A4%90%7C%E7%86%B1%E7%82%92%E6%8E%A8%E8%96%A6%7C%E4%BA%BA%E6%B0%A3%E7%86%B1%E7%82%92%7C%E7%89%B9%E8%89%B2%E9%A4%90%E5%BB%B3&query_place_id=ChIJxTNXjEk5aTQR0acwfn6paoU
+  custom_params:
+    company: "\u4E39\u96F2\u5C0F\u9910\u9928 \u4E2D\u5F0F\u5C0F\u7092 -\u5F70\u5316\
+      \u5348\u9910\u9996\u9078|\u5E73\u50F9\u5348\u9910|\u63A8\u85A6\u665A\u9910|\u71B1\
+      \u7092\u63A8\u85A6|\u4EBA\u6C23\u71B1\u7092|\u7279\u8272\u9910\u5EF3"
+    address: "500, Taiwan, Changhua County, Changhua City, \u798F\u5B89\u91CC\u798F\
+      \u93AE\u88577\u865F"
+    source: Google Maps
+    google_place_id: ChIJxTNXjEk5aTQR0acwfn6paoU

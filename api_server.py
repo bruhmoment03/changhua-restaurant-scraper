@@ -497,6 +497,15 @@ class ScrapeAllRequest(BaseModel):
     scrape_mode: Optional[str] = None
     default_max_reviews: Optional[int] = Field(None, ge=1)
     only_below_threshold: bool = True
+    exclude_known_below_goal: bool = False
+
+
+class ScrapeSettingsResponse(BaseModel):
+    max_concurrent_jobs: int = 1
+
+
+class UpdateScrapeSettingsRequest(BaseModel):
+    max_concurrent_jobs: int = Field(..., ge=1, le=10)
 
 
 class ScrapeTargetRequest(BaseModel):
@@ -697,6 +706,46 @@ class DataHealthSummaryResponse(BaseModel):
     recent_invalid_places: List[InvalidPlaceArchiveRow] = []
 
 
+class DatasetBundleGenerateRequest(BaseModel):
+    config_path: str = "batch/config.top50.yaml"
+    min_reviews: int = Field(100, ge=0)
+    include_deleted: bool = False
+
+
+class DatasetBundleArtifactRow(BaseModel):
+    filename: str
+    format: str
+    row_count: Optional[int] = None
+    sha256: Optional[str] = None
+    columns: List[str] = Field(default_factory=list)
+    exists: bool = False
+    size_bytes: Optional[int] = None
+    download_path: str
+    previewable: bool = False
+    preview_path: Optional[str] = None
+
+
+class DatasetBundleArtifactPreviewPayload(BaseModel):
+    kind: str
+    columns: List[str] = Field(default_factory=list)
+    rows: List[Dict[str, str]] = Field(default_factory=list)
+    sample_row_count: int = 0
+    total_row_count: int = 0
+    truncated: bool = False
+
+
+class DatasetBundleArtifactPreviewResponse(BaseModel):
+    artifact: DatasetBundleArtifactRow
+    preview: DatasetBundleArtifactPreviewPayload
+
+
+class DatasetBundleSummaryResponse(BaseModel):
+    output_dir: str
+    manifest: Dict[str, Any]
+    qa_report_excerpt: Dict[str, Any]
+    artifacts: List[DatasetBundleArtifactRow] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Background task for periodic cleanup
 # ---------------------------------------------------------------------------
@@ -716,6 +765,29 @@ async def cleanup_jobs_periodically():
 def _clean_review(row: Dict[str, Any]) -> Dict[str, Any]:
     """Strip _-prefixed internal keys added by _deserialize_review()."""
     return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+def _dataset_bundle_summary_response(payload: Dict[str, Any]) -> DatasetBundleSummaryResponse:
+    artifacts = [
+        DatasetBundleArtifactRow(**artifact)
+        for artifact in payload.get("artifacts", [])
+        if isinstance(artifact, dict)
+    ]
+    return DatasetBundleSummaryResponse(
+        output_dir=str(payload.get("output_dir") or ""),
+        manifest=dict(payload.get("manifest") or {}),
+        qa_report_excerpt=dict(payload.get("qa_report_excerpt") or {}),
+        artifacts=artifacts,
+    )
+
+
+def _dataset_bundle_preview_response(payload: Dict[str, Any]) -> DatasetBundleArtifactPreviewResponse:
+    artifact_payload = payload.get("artifact")
+    preview_payload = payload.get("preview")
+    return DatasetBundleArtifactPreviewResponse(
+        artifact=DatasetBundleArtifactRow(**(artifact_payload if isinstance(artifact_payload, dict) else {})),
+        preview=DatasetBundleArtifactPreviewPayload(**(preview_payload if isinstance(preview_payload, dict) else {})),
+    )
 
 
 def _read_structured_log_tail(log_path: Path, limit: int, level: Optional[str]) -> List[Dict[str, Any]]:
@@ -1537,6 +1609,34 @@ async def ops_discovery_search(request: DiscoverySearchRequest, review_db=Depend
 
 
 @ops_router.get(
+    "/ops/scrape/settings",
+    response_model=ScrapeSettingsResponse,
+    summary="Get Live Scrape Settings",
+)
+async def ops_get_scrape_settings():
+    if not job_manager:
+        raise HTTPException(status_code=500, detail="Job manager not initialized")
+    return ScrapeSettingsResponse(
+        max_concurrent_jobs=int(getattr(job_manager, "max_concurrent_jobs", 1) or 1)
+    )
+
+
+@ops_router.post(
+    "/ops/scrape/settings",
+    response_model=ScrapeSettingsResponse,
+    summary="Update Live Scrape Settings",
+)
+async def ops_update_scrape_settings(request: UpdateScrapeSettingsRequest):
+    if not job_manager:
+        raise HTTPException(status_code=500, detail="Job manager not initialized")
+    try:
+        updated_limit = int(job_manager.set_max_concurrent_jobs(request.max_concurrent_jobs))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ScrapeSettingsResponse(max_concurrent_jobs=updated_limit)
+
+
+@ops_router.get(
     "/ops/discovery/candidates",
     response_model=List[DiscoveryCandidateRow],
     summary="List Discovery Candidates",
@@ -1799,6 +1899,24 @@ async def ops_scrape_all(request: ScrapeAllRequest, review_db=Depends(get_review
     queued_jobs = []
     skipped_targets = []
     errors = []
+
+    if request.exclude_known_below_goal:
+        filtered_selected: List[tuple[Dict[str, Any], Dict[str, Any]]] = []
+        for biz, target in selected:
+            known_total = int(target.get("cached_total_reviews", 0) or 0)
+            if known_total > 0 and known_total < int(request.min_reviews):
+                skipped_targets.append(
+                    {
+                        "company": target.get("company"),
+                        "google_place_id": target.get("google_place_id"),
+                        "reason": "known_total_below_goal",
+                        "cached_total_reviews": known_total,
+                        "min_reviews": int(request.min_reviews),
+                    }
+                )
+                continue
+            filtered_selected.append((biz, target))
+        selected = filtered_selected
 
     request_overrides = {
         "headless": request.headless,
@@ -2118,6 +2236,7 @@ async def export_all(
     format: ExportFormat = Query("xlsx"),
     include_deleted: bool = Query(False, description="Include soft-deleted rows"),
     exclude_empty_text: bool = Query(False, description="Exclude reviews with no text content"),
+    min_review_count: Optional[int] = Query(None, ge=0, description="Only include places with at least this many exported reviews"),
     sheet_name: Optional[str] = Query(None, description="Custom sheet name for XLSX exports"),
     columns: Optional[str] = Query(None, description="Comma-separated list of columns to include"),
     review_db=Depends(get_review_db),
@@ -2130,6 +2249,11 @@ async def export_all(
         sheet_name=sheet_name,
         columns=columns,
     )
+    normalized_min_review_count: Optional[int] = None
+    if isinstance(min_review_count, int):
+        normalized_min_review_count = min_review_count
+    elif isinstance(min_review_count, str) and min_review_count.strip():
+        normalized_min_review_count = max(0, int(min_review_count))
 
     try:
         from modules.export_service import build_all_export
@@ -2139,6 +2263,7 @@ async def export_all(
             fmt=format,
             include_deleted=include_deleted,
             exclude_empty_text=exclude_empty_text,
+            min_review_count=normalized_min_review_count,
             sheet_name=sheet_name,
             columns=col_list,
         )
@@ -2150,6 +2275,99 @@ async def export_all(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@exports_router.post(
+    "/exports/dataset-bundle/generate",
+    response_model=DatasetBundleSummaryResponse,
+    summary="Generate Canonical Latest Dataset Bundle",
+)
+async def generate_dataset_bundle(
+    request: DatasetBundleGenerateRequest,
+    review_db=Depends(get_review_db),
+):
+    """Generate the one canonical latest dataset bundle used by the dashboard."""
+    cfg_path = _resolve_config_path(request.config_path)
+    config = load_config(cfg_path)
+
+    try:
+        from modules.dataset_export_service import generate_latest_dataset_bundle
+
+        payload = generate_latest_dataset_bundle(
+            review_db=review_db,
+            config=config,
+            config_path=str(cfg_path),
+            min_reviews=int(request.min_reviews),
+            include_deleted=bool(request.include_deleted),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return _dataset_bundle_summary_response(payload)
+
+
+@exports_router.get(
+    "/exports/dataset-bundle/latest",
+    response_model=DatasetBundleSummaryResponse,
+    summary="Get Canonical Latest Dataset Bundle Summary",
+)
+async def get_latest_dataset_bundle():
+    """Return backend-provided metadata for the one canonical latest dataset bundle."""
+    try:
+        from modules.dataset_export_service import load_latest_dataset_bundle_summary
+
+        payload = load_latest_dataset_bundle_summary()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return _dataset_bundle_summary_response(payload)
+
+
+@exports_router.get(
+    "/exports/dataset-bundle/latest/artifacts/{artifact_name}",
+    summary="Download One Artifact From Canonical Latest Dataset Bundle",
+)
+async def download_latest_dataset_bundle_artifact(artifact_name: str):
+    """Download one manifest-listed artifact from the canonical latest bundle."""
+    try:
+        from modules.dataset_export_service import read_latest_dataset_bundle_artifact
+
+        payload, media_type, filename = read_latest_dataset_bundle_artifact(artifact_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@exports_router.get(
+    "/exports/dataset-bundle/latest/artifacts/{artifact_name}/preview",
+    response_model=DatasetBundleArtifactPreviewResponse,
+    summary="Preview One CSV Artifact From Canonical Latest Dataset Bundle",
+)
+async def preview_latest_dataset_bundle_artifact(artifact_name: str):
+    """Preview one manifest-listed CSV artifact from the canonical latest bundle."""
+    try:
+        from modules.dataset_export_service import (
+            preview_latest_dataset_bundle_artifact as preview_dataset_bundle_artifact_payload,
+        )
+
+        payload = preview_dataset_bundle_artifact_payload(artifact_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return _dataset_bundle_preview_response(payload)
 
 
 # --- Audit Log Router ---

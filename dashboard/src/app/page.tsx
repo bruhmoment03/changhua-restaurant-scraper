@@ -10,6 +10,7 @@ import {
   DiscoveryCandidate,
   Job,
   LogTailEntry,
+  Place,
   PlaceValidationResult,
   ProgressReport,
   approveDiscoveryCandidates,
@@ -18,23 +19,31 @@ import {
   getDiscoveryCandidates,
   getJobs,
   getLogTail,
+  getPlaces,
   getProgress,
+  getScrapeSettings,
   rebuildPlaceTotals,
   rejectDiscoveryCandidates,
   scrapeAllWithSettings,
   scrapeTargets,
   searchDiscoveryCandidates,
+  updateScrapeSettings,
   validatePlaces,
 } from "@/lib/api";
+import { DiscoveryMap } from "@/components/DiscoveryMap";
 
 const CONFIG_PATH = "batch/config.top50.yaml";
 const DEFAULT_MIN_REVIEWS = 100;
 const THRESHOLD_OPTIONS = [100, 150, 200, 250, 300];
 const MAX_REVIEW_OPTIONS = [100, 150, 200, 250, 300, 400, 500];
 const DISCOVERY_LIMIT_OPTIONS = [50, 100, 150, 200];
+const DISCOVERY_CANDIDATE_LIST_LIMIT = 200;
 const DISCOVERY_MIN_RATING_OPTIONS = [0, 3.5, 4.0, 4.2, 4.5];
 const DISCOVERY_MIN_TOTAL_OPTIONS = [0, 50, 100, 200, 500];
 const DISCOVERY_RADIUS_OPTIONS = [0, 1000, 3000, 5000, 10000, 20000];
+const SCRAPE_CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10];
+const DISCOVERY_PRESET_QUERY = "餐廳";
+const DISCOVERY_PRESET_LIMIT = 200;
 
 function fmtTs(value?: string | null): string {
   if (!value) return "-";
@@ -85,6 +94,22 @@ function jobSummary(jobs: Job[]) {
   return by;
 }
 
+function candidateRatingsTotal(candidate: DiscoveryCandidate): number {
+  return Math.max(0, Number(candidate.user_ratings_total ?? 0) || 0);
+}
+
+function candidateMeetsDiscoveryGoal(candidate: DiscoveryCandidate, minReviews: number): boolean {
+  return candidateRatingsTotal(candidate) >= Math.max(0, minReviews);
+}
+
+function candidateIsApprovable(candidate: DiscoveryCandidate): boolean {
+  return candidate.status === "staged" || candidate.status === "duplicate_db";
+}
+
+function candidateIsQueueReady(candidate: DiscoveryCandidate): boolean {
+  return candidate.status === "approved" || candidate.status === "duplicate_config";
+}
+
 export default function HomePage() {
   const [stats, setStats] = useState<DbStats | null>(null);
   const [progress, setProgress] = useState<ProgressReport | null>(null);
@@ -93,6 +118,7 @@ export default function HomePage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
   const [validationResults, setValidationResults] = useState<PlaceValidationResult[]>([]);
+  const [places, setPlaces] = useState<Place[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [actionBusy, setActionBusy] = useState("");
@@ -102,15 +128,27 @@ export default function HomePage() {
   const [minReviews, setMinReviews] = useState(DEFAULT_MIN_REVIEWS);
   const [defaultMaxReviews, setDefaultMaxReviews] = useState(300);
   const [onlyBelowThreshold, setOnlyBelowThreshold] = useState(true);
+  const [currentScrapeConcurrency, setCurrentScrapeConcurrency] = useState(1);
+  const [scrapeConcurrencyDraft, setScrapeConcurrencyDraft] = useState(1);
 
   const [searchQuery, setSearchQuery] = useState("restaurants in Changhua City");
   const [searchLimit, setSearchLimit] = useState(50);
   const [minRating, setMinRating] = useState(0);
   const [minRatingsTotal, setMinRatingsTotal] = useState(100);
-  const [location, setLocation] = useState("");
-  const [radiusM, setRadiusM] = useState(0);
+  const [location, setLocation] = useState("24.0809,120.5382");
+  const [radiusM, setRadiusM] = useState(5000);
+
+  const parsedCenter = useMemo(() => {
+    if (!location.trim()) return null;
+    const parts = location.split(",").map((s) => parseFloat(s.trim()));
+    if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) return parts;
+    return null;
+  }, [location]);
+
+  const [mapExpanded, setMapExpanded] = useState(false);
 
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
+  const discoveryPresetMinRatingsTotal = Math.max(minReviews, 100);
 
   useEffect(() => {
     try {
@@ -153,13 +191,15 @@ export default function HomePage() {
     setLoading(true);
     setPageError("");
     try {
-      const [statsRes, progressRes, healthRes, errorsRes, jobsRes, candidatesRes] = await Promise.all([
+      const [statsRes, progressRes, healthRes, errorsRes, jobsRes, candidatesRes, placesRes, scrapeSettingsRes] = await Promise.all([
         getDbStats(),
         getProgress(CONFIG_PATH, minReviews),
         getDataHealthSummary(CONFIG_PATH, minReviews),
         getLogTail("ERROR", 20),
         getJobs(100),
-        getDiscoveryCandidates({ configPath: CONFIG_PATH, limit: 40 }),
+        getDiscoveryCandidates({ configPath: CONFIG_PATH, limit: DISCOVERY_CANDIDATE_LIST_LIMIT }),
+        getPlaces(),
+        getScrapeSettings(),
       ]);
       setStats(statsRes);
       setProgress(progressRes);
@@ -167,6 +207,9 @@ export default function HomePage() {
       setErrors(errorsRes);
       setJobs(jobsRes);
       setCandidates(candidatesRes);
+      setPlaces(placesRes);
+      setCurrentScrapeConcurrency(scrapeSettingsRes.max_concurrent_jobs);
+      setScrapeConcurrencyDraft(scrapeSettingsRes.max_concurrent_jobs);
     } catch (err) {
       setPageError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
@@ -203,6 +246,27 @@ export default function HomePage() {
     () => candidates.filter((candidate) => selectedCandidateIds.includes(candidate.candidate_id)),
     [candidates, selectedCandidateIds]
   );
+  const workflowCandidates = useMemo(
+    () =>
+      candidates.filter(
+        (candidate) =>
+          candidateMeetsDiscoveryGoal(candidate, minReviews) &&
+          (candidateIsApprovable(candidate) || candidateIsQueueReady(candidate))
+      ),
+    [candidates, minReviews]
+  );
+  const approvableWorkflowCandidates = useMemo(
+    () => workflowCandidates.filter((candidate) => candidateIsApprovable(candidate)),
+    [workflowCandidates]
+  );
+  const queueReadyWorkflowCandidates = useMemo(
+    () => workflowCandidates.filter((candidate) => candidateIsQueueReady(candidate)),
+    [workflowCandidates]
+  );
+  const belowGoalDiscoveryCandidates = useMemo(
+    () => candidates.filter((candidate) => !candidateMeetsDiscoveryGoal(candidate, minReviews)),
+    [candidates, minReviews]
+  );
   const allCandidateIds = useMemo(() => candidates.map((candidate) => candidate.candidate_id), [candidates]);
   const allCandidatesSelected = useMemo(
     () => candidates.length > 0 && selectedCandidateIds.length === candidates.length,
@@ -231,10 +295,7 @@ export default function HomePage() {
       const candidateIds = candidates.map((candidate) => candidate.candidate_id);
       const prevSet = new Set(prev);
       const stillSelected = candidateIds.filter((candidateId) => prevSet.has(candidateId));
-      if (stillSelected.length > 0) {
-        return stillSelected;
-      }
-      return candidateIds;
+      return stillSelected;
     });
   }, [candidates]);
 
@@ -251,6 +312,10 @@ export default function HomePage() {
   const clearCandidateSelection = useCallback(() => {
     setSelectedCandidateIds([]);
   }, []);
+
+  const selectWorkflowCandidates = useCallback(() => {
+    setSelectedCandidateIds(workflowCandidates.map((candidate) => candidate.candidate_id));
+  }, [workflowCandidates]);
 
   const refreshAfterMutation = useCallback(async () => {
     await loadDashboard();
@@ -275,6 +340,31 @@ export default function HomePage() {
     }
   }, [defaultMaxReviews, minReviews, onlyBelowThreshold, refreshAfterMutation]);
 
+  const onQueueReachableBelowThreshold = useCallback(async () => {
+    setActionBusy("queue-known-total-threshold");
+    setActionMessage("");
+    try {
+      const res = await scrapeAllWithSettings({
+        configPath: CONFIG_PATH,
+        minReviews,
+        defaultMaxReviews,
+        onlyBelowThreshold,
+        excludeKnownBelowGoal: true,
+      });
+      const skippedKnownLowTotals = res.skipped_targets.filter(
+        (row) => String(row.reason || "") === "known_total_below_goal"
+      ).length;
+      setActionMessage(
+        `Queued ${res.created_count} RPA job(s) for active targets after skipping ${skippedKnownLowTotals} known low-total restaurant(s).`
+      );
+      await refreshAfterMutation();
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : "Failed to queue filtered RPA jobs");
+    } finally {
+      setActionBusy("");
+    }
+  }, [defaultMaxReviews, minReviews, onlyBelowThreshold, refreshAfterMutation]);
+
   const onValidateActivePlaces = useCallback(async () => {
     setActionBusy("validate-places");
     setActionMessage("");
@@ -292,22 +382,36 @@ export default function HomePage() {
     }
   }, [refreshAfterMutation]);
 
-  const onSearchDiscovery = useCallback(async () => {
-    setActionBusy("search-discovery");
+  const runDiscoverySearch = useCallback(async (options?: {
+    actionKey?: string;
+    query?: string;
+    limit?: number;
+    minRatingsTotal?: number;
+    successPrefix?: string;
+    autoSelectIds?: (candidates: DiscoveryCandidate[]) => number[];
+  }) => {
+    const actionKey = options?.actionKey || "search-discovery";
+    const query = (options?.query ?? searchQuery).trim();
+    const limit = options?.limit ?? searchLimit;
+    const ratingsTotal = options?.minRatingsTotal ?? minRatingsTotal;
+
+    setActionBusy(actionKey);
     setActionMessage("");
     try {
       const res = await searchDiscoveryCandidates({
         configPath: CONFIG_PATH,
-        query: searchQuery,
-        limit: searchLimit,
+        query,
+        limit,
         minRating,
-        minRatingsTotal,
+        minRatingsTotal: ratingsTotal,
         location: location.trim() || null,
         radiusM: radiusM > 0 ? radiusM : null,
       });
       setCandidates(res.candidates);
-      setSelectedCandidateIds([]);
-      setActionMessage(`Stored ${res.candidate_count} candidate(s); ${res.staged_count} are ready for approval.`);
+      setSelectedCandidateIds(options?.autoSelectIds ? options.autoSelectIds(res.candidates) : []);
+      setActionMessage(
+        `${options?.successPrefix || "Stored"} ${res.candidate_count} candidate(s); ${res.staged_count} are ready for approval.`
+      );
       await refreshAfterMutation();
     } catch (err) {
       setActionMessage(err instanceof Error ? err.message : "Failed to search discovery candidates");
@@ -315,6 +419,33 @@ export default function HomePage() {
       setActionBusy("");
     }
   }, [location, minRating, minRatingsTotal, radiusM, refreshAfterMutation, searchLimit, searchQuery]);
+
+  const onSearchDiscovery = useCallback(async () => {
+    await runDiscoverySearch();
+  }, [runDiscoverySearch]);
+
+  const onSearchRestaurantPreset = useCallback(async () => {
+    const presetQuery = DISCOVERY_PRESET_QUERY;
+    const presetLimit = DISCOVERY_PRESET_LIMIT;
+    setSearchQuery(presetQuery);
+    setSearchLimit(presetLimit);
+    setMinRatingsTotal(discoveryPresetMinRatingsTotal);
+    await runDiscoverySearch({
+      actionKey: "search-discovery-restaurant-preset",
+      query: presetQuery,
+      limit: presetLimit,
+      minRatingsTotal: discoveryPresetMinRatingsTotal,
+      successPrefix: `Stored ${presetQuery} preset results with ${discoveryPresetMinRatingsTotal}+ ratings across`,
+      autoSelectIds: (rows) =>
+        rows
+          .filter(
+            (candidate) =>
+              candidateMeetsDiscoveryGoal(candidate, minReviews) &&
+              (candidateIsApprovable(candidate) || candidateIsQueueReady(candidate))
+          )
+          .map((candidate) => candidate.candidate_id),
+    });
+  }, [discoveryPresetMinRatingsTotal, minReviews, runDiscoverySearch]);
 
   const onApproveSelected = useCallback(async () => {
     if (selectedCandidateIds.length === 0) return;
@@ -382,6 +513,128 @@ export default function HomePage() {
     }
   }, [defaultMaxReviews, queuedCandidateGooglePlaceIds, refreshAfterMutation]);
 
+  const onApproveWorkflowCandidates = useCallback(async () => {
+    const approvableIds = approvableWorkflowCandidates.map((candidate) => candidate.candidate_id);
+    if (approvableIds.length === 0) {
+      setActionMessage(`No ${minReviews}+ staged candidates are ready to approve.`);
+      return;
+    }
+    setActionBusy("approve-workflow-candidates");
+    setActionMessage("");
+    try {
+      const res: ApproveDiscoveryCandidatesResponse = await approveDiscoveryCandidates({
+        configPath: CONFIG_PATH,
+        candidateIds: approvableIds,
+      });
+      const queueReadyIds = res.candidates
+        .filter((candidate) => candidateIsQueueReady(candidate))
+        .map((candidate) => candidate.candidate_id);
+      setSelectedCandidateIds(queueReadyIds);
+      setActionMessage(
+        `Approved ${res.approved_count} ${minReviews}+ candidate(s); ${res.skipped_count} were already present in config.`
+      );
+      await refreshAfterMutation();
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : "Failed to approve eligible candidates");
+    } finally {
+      setActionBusy("");
+    }
+  }, [approvableWorkflowCandidates, minReviews, refreshAfterMutation]);
+
+  const onApproveAndQueueWorkflowCandidates = useCallback(async () => {
+    const approvableIds = approvableWorkflowCandidates.map((candidate) => candidate.candidate_id);
+    const existingQueueReadyIds = queueReadyWorkflowCandidates.map((candidate) => candidate.google_place_id);
+    if (approvableIds.length === 0 && existingQueueReadyIds.length === 0) {
+      setActionMessage(`No ${minReviews}+ discovery candidates are ready to approve or queue.`);
+      return;
+    }
+
+    setActionBusy("approve-queue-workflow-candidates");
+    setActionMessage("");
+    try {
+      let approvedCount = 0;
+      let skippedCount = 0;
+      const queueGooglePlaceIds = new Set(existingQueueReadyIds);
+
+      if (approvableIds.length > 0) {
+        const approveRes: ApproveDiscoveryCandidatesResponse = await approveDiscoveryCandidates({
+          configPath: CONFIG_PATH,
+          candidateIds: approvableIds,
+        });
+        approvedCount = approveRes.approved_count;
+        skippedCount = approveRes.skipped_count;
+        for (const candidate of approveRes.candidates) {
+          if (candidateIsQueueReady(candidate)) {
+            queueGooglePlaceIds.add(candidate.google_place_id);
+          }
+        }
+      }
+
+      const queueRes = await scrapeTargets({
+        configPath: CONFIG_PATH,
+        googlePlaceIds: Array.from(queueGooglePlaceIds),
+        maxReviews: defaultMaxReviews,
+      });
+      setSelectedCandidateIds(
+        workflowCandidates
+          .filter((candidate) => candidateIsQueueReady(candidate))
+          .map((candidate) => candidate.candidate_id)
+      );
+      setActionMessage(
+        `Approved ${approvedCount} candidate(s), skipped ${skippedCount}, and queued ${queueRes.created_count} RPA job(s) from ${queueGooglePlaceIds.size} ${minReviews}+ discovery target(s).`
+      );
+      await refreshAfterMutation();
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : "Failed to approve and queue eligible discovery candidates");
+    } finally {
+      setActionBusy("");
+    }
+  }, [
+    approvableWorkflowCandidates,
+    defaultMaxReviews,
+    minReviews,
+    queueReadyWorkflowCandidates,
+    refreshAfterMutation,
+    workflowCandidates,
+  ]);
+
+  const onRescrapeAllTargets = useCallback(async () => {
+    setActionBusy("queue-all-targets");
+    setActionMessage("");
+    try {
+      const res = await scrapeAllWithSettings({
+        configPath: CONFIG_PATH,
+        minReviews,
+        defaultMaxReviews,
+        onlyBelowThreshold: false,
+      });
+      setActionMessage(`Queued ${res.created_count} RPA job(s) across all active targets.`);
+      await refreshAfterMutation();
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : "Failed to queue full rescrape");
+    } finally {
+      setActionBusy("");
+    }
+  }, [defaultMaxReviews, minReviews, refreshAfterMutation]);
+
+  const onApplyScrapeConcurrency = useCallback(async () => {
+    setActionBusy("update-scrape-concurrency");
+    setActionMessage("");
+    try {
+      const res = await updateScrapeSettings(scrapeConcurrencyDraft);
+      setCurrentScrapeConcurrency(res.max_concurrent_jobs);
+      setScrapeConcurrencyDraft(res.max_concurrent_jobs);
+      setActionMessage(
+        `Updated live scrape concurrency to ${res.max_concurrent_jobs} concurrent job(s). New jobs will use the new limit.`
+      );
+      await refreshAfterMutation();
+    } catch (err) {
+      setActionMessage(err instanceof Error ? err.message : "Failed to update scrape concurrency");
+    } finally {
+      setActionBusy("");
+    }
+  }, [refreshAfterMutation, scrapeConcurrencyDraft]);
+
   const onRebuildTotals = useCallback(async () => {
     setActionBusy("rebuild-totals");
     setActionMessage("");
@@ -426,6 +679,20 @@ export default function HomePage() {
           >
             {actionBusy === "queue-below-threshold" ? "Queueing..." : "Queue RPA Scrape"}
           </button>
+          <button
+            onClick={() => void onQueueReachableBelowThreshold()}
+            disabled={actionBusy.length > 0}
+            className="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text disabled:opacity-50"
+          >
+            {actionBusy === "queue-known-total-threshold" ? "Queueing..." : `Queue RPA (${minReviews}+ Total)`}
+          </button>
+          <button
+            onClick={() => void onRescrapeAllTargets()}
+            disabled={actionBusy.length > 0}
+            className="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text disabled:opacity-50"
+          >
+            {actionBusy === "queue-all-targets" ? "Queueing..." : "Rescrape All Targets"}
+          </button>
         </div>
       </div>
 
@@ -440,9 +707,9 @@ export default function HomePage() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
         <StatCard label="In Config" value={health?.active_config_targets ?? (loading ? "..." : "-")} sub="Restaurants tracked for scraping" />
-        <StatCard label="In Database" value={health?.db_places_count ?? (loading ? "..." : "-")} sub="Have at least some reviews scraped" />
+        <StatCard label="In Database" value={health?.db_places_count ?? (loading ? "..." : "-")} sub="Have at least some text reviews scraped" />
         <StatCard label={`Goal Met (${minReviews}+)`} value={progress?.meeting_min_reviews ?? (loading ? "..." : "-")} sub="Ready for export & analysis" tone="good" />
-        <StatCard label="Still Scraping" value={progress?.under_min_reviews ?? (loading ? "..." : "-")} sub={`Have < ${minReviews} reviews so far`} tone="warn" />
+        <StatCard label="Still Scraping" value={progress?.under_min_reviews ?? (loading ? "..." : "-")} sub={`Have < ${minReviews} text reviews so far`} tone="warn" />
         <StatCard
           label="Exhausted"
           value={health?.exhausted_under_threshold_count ?? (loading ? "..." : "-")}
@@ -454,13 +721,16 @@ export default function HomePage() {
 
       <Card title="Scrape Settings">
         <div className="mb-3 text-sm text-muted">
-          Each restaurant needs at least <strong className="text-text/80">{minReviews}</strong> reviews to be considered complete.
-          The scraper collects up to <strong className="text-text/80">{defaultMaxReviews}</strong> reviews per run — if a restaurant has more,
+          Each restaurant needs at least <strong className="text-text/80">{minReviews}</strong> reviews with text to be considered complete.
+          The scraper collects up to <strong className="text-text/80">{defaultMaxReviews}</strong> review rows per run — if a restaurant has more,
           it may take multiple runs. Discovery filters restaurants with fewer than {minReviews} total Google ratings automatically.
         </div>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="mb-3 text-xs text-muted">
+          <span className="text-text/80">{`Queue RPA (${minReviews}+ Total)`}</span> skips restaurants whose known cached Google total is already below the current goal, so low-total places do not keep re-entering long backfill runs.
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
           <label className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wide text-muted">Min Reviews Goal</span>
+            <span className="text-xs uppercase tracking-wide text-muted">Min Text Reviews Goal</span>
             <select
               value={minReviews}
               onChange={(event) => setMinReviews(Number(event.target.value))}
@@ -495,6 +765,32 @@ export default function HomePage() {
             />
             Only queue restaurants below goal
           </label>
+          <div className="rounded-xl border border-border/60 bg-bg/40 p-3">
+            <div className="text-xs uppercase tracking-wide text-muted">Live Concurrency</div>
+            <div className="mt-1 text-sm text-muted">
+              Current server limit: <strong className="text-text/80">{currentScrapeConcurrency}</strong>
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                value={scrapeConcurrencyDraft}
+                onChange={(event) => setScrapeConcurrencyDraft(Number(event.target.value))}
+                className="rounded-xl border border-border/60 bg-bg/40 px-3 py-2 text-sm text-text outline-none focus:border-accent/60"
+              >
+                {SCRAPE_CONCURRENCY_OPTIONS.map((value) => (
+                  <option key={value} value={value}>
+                    {value} concurrent jobs
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void onApplyScrapeConcurrency()}
+                disabled={actionBusy.length > 0 || scrapeConcurrencyDraft === currentScrapeConcurrency}
+                className="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text disabled:opacity-50"
+              >
+                {actionBusy === "update-scrape-concurrency" ? "Applying..." : "Apply"}
+              </button>
+            </div>
+          </div>
         </div>
       </Card>
 
@@ -513,10 +809,31 @@ export default function HomePage() {
               <strong className="text-text/80">Workflow:</strong> Search → Review candidates → Approve → Queue RPA to scrape reviews.
             </p>
             <p>
+              <strong className="text-text/80">Fast lane:</strong> use the <span className="text-text/80">餐廳</span> preset,
+              which searches broadly and preselects candidates that already meet the current review goal.
+            </p>
+            <p>
               <strong className="text-text/80">Tip:</strong> To find more restaurants, try different queries
               (e.g. &quot;cafes in Changhua&quot;, &quot;food in Changhua District&quot;) or adjust the search center/radius.
               Each search can return up to 200 results, and duplicates are auto-skipped.
             </p>
+          </div>
+          <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
+              <div className="text-xs uppercase tracking-wide text-muted">Workflow Ready</div>
+              <div className="mt-1 text-2xl font-semibold text-text">{workflowCandidates.length}</div>
+              <div className="mt-1 text-xs text-muted">{minReviews}+ ratings and actionable now</div>
+            </div>
+            <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
+              <div className="text-xs uppercase tracking-wide text-muted">Need Approval</div>
+              <div className="mt-1 text-2xl font-semibold text-text">{approvableWorkflowCandidates.length}</div>
+              <div className="mt-1 text-xs text-muted">staged or duplicate-db candidates</div>
+            </div>
+            <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
+              <div className="text-xs uppercase tracking-wide text-muted">Already Queue-Ready</div>
+              <div className="mt-1 text-2xl font-semibold text-text">{queueReadyWorkflowCandidates.length}</div>
+              <div className="mt-1 text-xs text-muted">{belowGoalDiscoveryCandidates.length} candidate(s) still below goal</div>
+            </div>
           </div>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <label className="flex flex-col gap-1">
@@ -596,9 +913,43 @@ export default function HomePage() {
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
-              onClick={() => void onSearchDiscovery()}
+              onClick={() => void onSearchRestaurantPreset()}
               disabled={actionBusy.length > 0 || !health?.google_places_api_configured}
               className="rounded-lg border border-accent/50 bg-accent/10 px-3 py-1.5 text-xs font-semibold text-accent disabled:opacity-50"
+            >
+              {actionBusy === "search-discovery-restaurant-preset"
+                ? "Searching..."
+                : `Find 餐廳 (${discoveryPresetMinRatingsTotal}+ ratings)`}
+            </button>
+            <button
+              onClick={selectWorkflowCandidates}
+              disabled={workflowCandidates.length === 0}
+              className="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text disabled:opacity-50"
+            >
+              {workflowCandidates.length > 0 ? `Select ${minReviews}+ Candidates` : `Select ${minReviews}+ Candidates`}
+            </button>
+            <button
+              onClick={() => void onApproveWorkflowCandidates()}
+              disabled={actionBusy.length > 0 || approvableWorkflowCandidates.length === 0}
+              className="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text disabled:opacity-50"
+            >
+              {actionBusy === "approve-workflow-candidates"
+                ? "Approving..."
+                : `Approve ${minReviews}+ Candidates`}
+            </button>
+            <button
+              onClick={() => void onApproveAndQueueWorkflowCandidates()}
+              disabled={actionBusy.length > 0 || workflowCandidates.length === 0}
+              className="rounded-lg border border-accent/50 bg-accent/10 px-3 py-1.5 text-xs font-semibold text-accent disabled:opacity-50"
+            >
+              {actionBusy === "approve-queue-workflow-candidates"
+                ? "Running..."
+                : `Approve & Queue ${minReviews}+`}
+            </button>
+            <button
+              onClick={() => void onSearchDiscovery()}
+              disabled={actionBusy.length > 0 || !health?.google_places_api_configured}
+              className="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text disabled:opacity-50"
             >
               {actionBusy === "search-discovery" ? "Searching..." : "Find Restaurants via Google API"}
             </button>
@@ -679,6 +1030,15 @@ export default function HomePage() {
                         </span>
                         {" "}· updated: {fmtTs(candidate.updated_at)}
                       </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {candidateMeetsDiscoveryGoal(candidate, minReviews) ? (
+                          <Badge tone="good">{`${minReviews}+ eligible`}</Badge>
+                        ) : (
+                          <Badge tone="warn">below goal</Badge>
+                        )}
+                        {candidateIsApprovable(candidate) ? <Badge tone="warn">needs approval</Badge> : null}
+                        {candidateIsQueueReady(candidate) ? <Badge tone="good">queue-ready</Badge> : null}
+                      </div>
                     </div>
                   </div>
                 </label>
@@ -711,6 +1071,42 @@ export default function HomePage() {
           </div>
         </Card>
       </div>
+
+      <Card
+        title={
+          <button
+            onClick={() => setMapExpanded((prev) => !prev)}
+            className="flex items-center gap-2 text-left"
+          >
+            <span className={`inline-block text-xs text-muted transition-transform ${mapExpanded ? "rotate-90" : ""}`}>&#9654;</span>
+            Discovery Map
+          </button>
+        }
+        right={
+          <div className="flex items-center gap-2">
+            <Badge tone="default">{places.filter((p) => p.latitude != null).length} places</Badge>
+            <button
+              onClick={() => setMapExpanded((prev) => !prev)}
+              className="rounded-lg border border-border/60 px-2 py-1 text-xs font-semibold text-muted hover:bg-accent/10 hover:text-text"
+            >
+              {mapExpanded ? "Collapse" : "Expand"}
+            </button>
+          </div>
+        }
+      >
+        <div
+          className={`overflow-hidden transition-all duration-300 ${mapExpanded ? "max-h-[500px] opacity-100" : "max-h-0 opacity-0"}`}
+        >
+          <div className="mb-2 text-sm text-muted">
+            Restaurants from the database plotted on the map.
+            {parsedCenter ? " The dashed circle shows the search radius limit." : " Set a search center above to see the radius boundary."}
+          </div>
+          <DiscoveryMap places={places} center={location} radiusM={radiusM} />
+        </div>
+        {!mapExpanded && (
+          <div className="text-sm text-muted">Click to expand the map view.</div>
+        )}
+      </Card>
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
         <Card title="Data Health" right={<Badge tone={health?.stale_total_count ? "warn" : "good"}>{health?.stale_total_count ?? 0}</Badge>}>
@@ -774,7 +1170,7 @@ export default function HomePage() {
             <div className="rounded-lg border border-border/50 bg-bg/40 p-2">cancelled: {summary.cancelled}</div>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-            <div className="rounded-lg border border-border/50 bg-bg/40 p-2">below {minReviews}: {progress?.under_min_reviews ?? "-"}</div>
+            <div className="rounded-lg border border-border/50 bg-bg/40 p-2">below {minReviews} text: {progress?.under_min_reviews ?? "-"}</div>
             <div className="rounded-lg border border-border/50 bg-bg/40 p-2">exhausted: {progress?.exhausted_under_threshold_count ?? "-"}</div>
             <div className="rounded-lg border border-border/50 bg-bg/40 p-2">staged candidates: {health?.staged_candidate_count ?? "-"}</div>
             <div className="rounded-lg border border-border/50 bg-bg/40 p-2">db reviews: {stats?.reviews_count ?? "-"}</div>
@@ -798,7 +1194,7 @@ export default function HomePage() {
       </div>
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-        <Card title={`Queue-Eligible Targets (< ${minReviews})`} right={<Badge tone="warn">{incompleteTargets.length}</Badge>}>
+        <Card title={`Queue-Eligible Targets (< ${minReviews} text)`} right={<Badge tone="warn">{incompleteTargets.length}</Badge>}>
           <div className="max-h-[min(48dvh,380px)] space-y-2 overflow-y-auto pr-1">
             {incompleteTargets.length === 0 ? <div className="text-sm text-muted">No queue-eligible targets below threshold.</div> : null}
             {incompleteTargets.map((target) => {
@@ -811,9 +1207,7 @@ export default function HomePage() {
                       {cannotReachGoal ? (
                         <Badge tone="bad">only {target.cached_total_reviews} on Google</Badge>
                       ) : (
-                        <Badge tone="warn">
-                          scraped {target.review_count} / {target.cached_total_reviews} total
-                        </Badge>
+                        <Badge tone="warn">{`text ${target.review_count} / total ${target.cached_total_reviews}`}</Badge>
                       )}
                     </div>
                   </div>
@@ -843,7 +1237,7 @@ export default function HomePage() {
                 </div>
                 <div className="mt-1 text-xs text-muted break-all">{target.google_place_id || target.place_id || "-"}</div>
                 <div className="mt-1 text-xs text-muted">
-                  reviews: {target.review_count} · validation: {target.validation_status || "unknown"}
+                  text reviews: {target.review_count} · validation: {target.validation_status || "unknown"}
                 </div>
               </div>
             ))}

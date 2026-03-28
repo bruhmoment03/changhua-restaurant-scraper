@@ -61,6 +61,27 @@ python start.py
 
 The SQLite database (`reviews.db`) is created automatically on first run.
 
+## Quick Setup On Another Device
+
+For the Changhua restaurant workflow on a second laptop/workstation:
+
+```bash
+git clone <your-fork-url>
+cd google-reviews-scraper-pro
+./setup
+./dev
+```
+
+`./setup` creates `.venv`, installs Python dependencies, installs dashboard dependencies, and copies missing local files from:
+
+- `.env.example` -> `.env`
+- `.env.google_maps.cookies.example` -> `.env.google_maps.cookies`
+- `config.sample.yaml` -> `config.yaml`
+
+Before scraping, edit `.env` with `GOOGLE_PLACES_API_KEY` (or `GOOGLE_MAPS_API_KEY`). If you are using the Changhua batch config in cookie mode, also fill in `.env.google_maps.cookies`.
+
+Detailed handoff steps live in [`docs/SETUP_ANOTHER_DEVICE.md`](/Users/speedo/Documents/project/google-reviews-scraper-pro/docs/SETUP_ANOTHER_DEVICE.md).
+
 ## Fine-Tuning Your Beast
 
 Look, this isn't some one-size-fits-all garbage. You've got full control over every aspect.

@@ -5,6 +5,8 @@ Shared progress helpers for batch scraping selection and reporting.
 import urllib.parse
 from typing import Any, Dict, List
 
+from modules.review_db import text_review_where_sql
+
 
 def resolve_businesses(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Resolve business list from config (supports businesses, urls, or url)."""
@@ -64,6 +66,7 @@ def business_identity(business: Dict[str, Any]) -> Dict[str, str]:
 
 def build_db_progress_index(review_db) -> Dict[str, Dict[str, Any]]:
     """Build DB lookup maps keyed by query_place_id and URL."""
+    text_review_where = text_review_where_sql()
     rows = review_db.backend.fetchall(
         "SELECT p.place_id, p.place_name, p.original_url, p.last_scraped, "
         "COALESCE(p.total_reviews, 0) AS cached_total_reviews, "
@@ -74,7 +77,7 @@ def build_db_progress_index(review_db) -> Dict[str, Dict[str, Any]]:
         "FROM places p "
         "LEFT JOIN ("
         "  SELECT place_id, COUNT(*) AS review_count "
-        "  FROM reviews WHERE is_deleted = 0 GROUP BY place_id"
+        f"  FROM reviews WHERE {text_review_where} GROUP BY place_id"
         ") rc ON rc.place_id = p.place_id"
     )
 
@@ -111,7 +114,10 @@ def compute_progress_report(
 ) -> Dict[str, Any]:
     """Compare configured businesses to DB state.
 
-    Legacy status fields remain based on min=1 semantics:
+    Threshold progress counts only reviews with actual review text.
+    Star-only rating rows do not count toward *min_reviews*.
+
+    Status fields remain based on min=1 text-review semantics:
       - with_reviews
       - present_zero_reviews
       - missing_from_db

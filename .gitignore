@@ -75,6 +75,7 @@ review_images/
 */reviews/
 images/
 downloaded_images/
+modules/image/
 
 # -----------------------------------------------------------
 # SeleniumBase / Playwright Files
@@ -96,6 +97,7 @@ output/
 *.xls
 *.tmp
 tmp/
+dataset_export/
 
 # Frontend build artifacts
 node_modules/
@@ -110,6 +112,8 @@ dashboard/out/
 !example_config.yaml
 !README.md
 !LICENSE
+!.env.example
+!.env.google_maps.cookies.example
 !dashboard/package.json
 !dashboard/tsconfig.json
 !dashboard/package-lock.json

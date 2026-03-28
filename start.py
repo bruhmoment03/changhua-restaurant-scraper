@@ -333,6 +333,33 @@ def _run_export(config, args):
         db.close()
 
 
+def _run_dataset_export(config, args):
+    """Run the config-scoped dataset bundle export command."""
+    from modules.dataset_export import export_dataset_bundle
+    from modules.review_db import ReviewDB
+
+    output_dir = getattr(args, "output_dir", None) or "dataset_export"
+    min_reviews = max(0, int(getattr(args, "min_reviews", 100) or 0))
+    config_path = str(getattr(args, "config", "config.yaml"))
+
+    db = ReviewDB(_get_db_path(config, args))
+    try:
+        manifest = export_dataset_bundle(
+            review_db=db,
+            config=config,
+            config_path=config_path,
+            output_dir=output_dir,
+            min_reviews=min_reviews,
+            include_deleted=bool(getattr(args, "include_deleted", False)),
+        )
+    finally:
+        db.close()
+
+    print(f"Dataset bundle written to {output_dir}")
+    for artifact in manifest.get("artifacts", []):
+        print(f"  - {artifact.get('filename')}")
+
+
 def _run_db_stats(config, args):
     """Run the db-stats command."""
     from modules.review_db import ReviewDB
@@ -673,6 +700,7 @@ def main():
         "scrape": _run_scrape,
         "progress": _run_progress,
         "export": _run_export,
+        "dataset-export": _run_dataset_export,
         "db-stats": _run_db_stats,
         "clear": _run_clear,
         "hide": _run_hide,

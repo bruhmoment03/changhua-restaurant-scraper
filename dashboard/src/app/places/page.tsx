@@ -287,7 +287,7 @@ export default function PlacesPage() {
                 <th className="w-[10%] px-3 py-2">Scope</th>
                 <th className="w-[14%] px-3 py-2">Queue Status</th>
                 <th className="w-[14%] px-3 py-2">Validation</th>
-                <th className="w-[12%] px-3 py-2">Reviews</th>
+                <th className="w-[12%] px-3 py-2">Text Reviews</th>
                 <th className="w-[12%] px-3 py-2">Last Scraped</th>
                 <th className="w-[10%] px-3 py-2">Actions</th>
               </tr>
@@ -311,7 +311,7 @@ export default function PlacesPage() {
                         <Badge tone={toneForStatus(rowStatus)}>{rowStatus}</Badge>
                         {target ? (
                           <div className="text-xs text-muted">
-                            {target.meets_min_reviews ? `>=${MIN_REVIEWS}` : target.reviews_exhausted ? "exhausted" : `<${MIN_REVIEWS}`}
+                            {target.meets_min_reviews ? `>=${MIN_REVIEWS} text` : target.reviews_exhausted ? "exhausted" : `<${MIN_REVIEWS} text`}
                           </div>
                         ) : null}
                       </div>
@@ -324,7 +324,7 @@ export default function PlacesPage() {
                       </div>
                     </td>
                     <td className="px-3 py-3 text-text">
-                      <div>live: {place.total_reviews}</div>
+                      <div>text: {place.total_reviews}</div>
                       <div className="text-xs text-muted">cached: {place.cached_total_reviews}</div>
                     </td>
                     <td className="px-3 py-3 text-muted">{fmtTs(target?.last_scraped || place.last_scraped)}</td>
@@ -375,11 +375,18 @@ export default function PlacesPage() {
         open={exportOpen}
         onClose={() => setExportOpen(false)}
         scope="all"
-        onSubmit={async ({ format, includeDeleted, excludeEmptyText, sheetName }) => {
+        onSubmit={async ({ format, includeDeleted, excludeEmptyText, minReviewCount, sheetName, columns }) => {
           setActionBusy("export:all");
           setActionMessage("");
           try {
-            await downloadAllExport(format, includeDeleted, excludeEmptyText, sheetName || undefined);
+            await downloadAllExport(
+              format,
+              includeDeleted,
+              excludeEmptyText,
+              minReviewCount,
+              sheetName || undefined,
+              columns
+            );
             setActionMessage(`Downloaded all places as ${String(format).toUpperCase()}.`);
           } finally {
             setActionBusy("");

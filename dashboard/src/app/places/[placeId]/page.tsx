@@ -94,11 +94,11 @@ export default function PlaceDetailPage() {
             <div className="mt-1 text-sm text-text">{fmtTs(place?.last_scraped)}</div>
           </div>
           <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
-            <div className="text-xs text-muted">Live reviews</div>
+            <div className="text-xs text-muted">Live text reviews</div>
             <div className="mt-1 text-sm text-text">{place?.total_reviews ?? "-"}</div>
           </div>
           <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
-            <div className="text-xs text-muted">Cached reviews</div>
+            <div className="text-xs text-muted">Cached text reviews</div>
             <div className="mt-1 text-sm text-text">{place?.cached_total_reviews ?? "-"}</div>
           </div>
           <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
@@ -146,7 +146,7 @@ export default function PlaceDetailPage() {
             </div>
           }
         >
-          <div className="space-y-2">
+          <div className="max-h-[min(60dvh,600px)] space-y-2 overflow-y-auto pr-1">
             {reviews.map((review) => {
               const hasText = Object.values(review.review_text || {}).some((t) => typeof t === "string" && t.trim().length > 0);
               return (
@@ -179,7 +179,7 @@ export default function PlaceDetailPage() {
         <Card title="Review Inspector" right={selectedReview ? <Badge tone={selectedReview.is_deleted ? "warn" : "good"}>{selectedReview.is_deleted ? "deleted" : "active"}</Badge> : null} className="min-w-0">
           {!selectedReview ? <div className="text-sm text-muted">Select a review to inspect.</div> : null}
           {selectedReview ? (
-            <div className="space-y-3">
+            <div className="max-h-[min(60dvh,600px)] space-y-3 overflow-y-auto pr-1">
               <div className="rounded-xl border border-border/50 bg-bg/40 p-3">
                 <div className="text-xs text-muted">Author</div>
                 <div className="text-sm text-text">{selectedReview.author || "Anonymous"}</div>
@@ -214,8 +214,8 @@ export default function PlaceDetailPage() {
         scope="place"
         placeName={place?.place_name || ""}
         placeId={placeId}
-        onSubmit={async ({ format, includeDeleted, excludeEmptyText, sheetName }) => {
-          await downloadPlaceExport(placeId, format, includeDeleted, excludeEmptyText, sheetName || undefined);
+        onSubmit={async ({ format, includeDeleted, excludeEmptyText, sheetName, columns }) => {
+          await downloadPlaceExport(placeId, format, includeDeleted, excludeEmptyText, sheetName || undefined, columns);
           setActionMessage(
             `Downloaded ${place?.place_name || placeId} as ${String(format).toUpperCase()}.`
           );

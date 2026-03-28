@@ -10,6 +10,10 @@ const sections = [
     items: [{ href: "/", label: "Dashboard Home" }],
   },
   {
+    label: "Derived Data",
+    items: [{ href: "/dataset-export", label: "Dataset / QA Export" }],
+  },
+  {
     label: "Inspection",
     items: [{ href: "/places", label: "Places" }, { href: "/logs", label: "Logs" }],
   },

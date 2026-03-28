@@ -488,6 +488,29 @@ class JobManager:
         stats["running_jobs"] = stats["by_status"].get(JobStatus.RUNNING.value, 0)
         
         return stats
+
+    def set_max_concurrent_jobs(self, limit: int) -> int:
+        """Update the live concurrency limit for newly started jobs."""
+        next_limit = max(1, int(limit or 1))
+        old_executor = None
+
+        with self.lock:
+            if self._shutting_down:
+                raise RuntimeError("Job manager is shutting down")
+            if next_limit == self.max_concurrent_jobs:
+                return self.max_concurrent_jobs
+
+            old_executor = self.executor
+            self.executor = ThreadPoolExecutor(max_workers=next_limit)
+            self.max_concurrent_jobs = next_limit
+
+        if old_executor is not None:
+            old_executor.shutdown(wait=False, cancel_futures=False)
+
+        log.info("Updated job manager max_concurrent_jobs=%d", next_limit)
+        if not self._shutting_down:
+            self._promote_pending_jobs()
+        return next_limit
     
     def cleanup_old_jobs(self, max_age_hours: int = 24):
         """

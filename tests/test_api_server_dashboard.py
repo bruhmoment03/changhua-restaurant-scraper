@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 
 import pytest
 import yaml
@@ -18,6 +19,8 @@ class _FakeJobManager:
     def __init__(self):
         self.created = []
         self._idx = 0
+        self.max_concurrent_jobs = 1
+        self.updated_limits = []
 
     def create_job(self, url, config_overrides=None):
         self._idx += 1
@@ -28,11 +31,16 @@ class _FakeJobManager:
     def start_job(self, job_id):
         return True
 
+    def set_max_concurrent_jobs(self, limit):
+        self.max_concurrent_jobs = int(limit)
+        self.updated_limits.append(int(limit))
+        return self.max_concurrent_jobs
 
-def _make_review(rid="r1"):
+
+def _make_review(rid="r1", text="Great!"):
     return {
         "review_id": rid,
-        "text": "Great!",
+        "text": text,
         "rating": 5.0,
         "likes": 1,
         "lang": "en",
@@ -120,6 +128,31 @@ def test_scrape_concurrency_limit_honors_valid_env(monkeypatch):
 def test_scrape_concurrency_limit_rejects_bad_env(monkeypatch):
     monkeypatch.setenv("SCRAPER_MAX_CONCURRENT_JOBS", "not-an-int")
     assert api_server._scrape_concurrency_limit() == 1
+
+
+def test_get_scrape_settings_reports_current_job_manager_limit(monkeypatch):
+    fake = _FakeJobManager()
+    fake.max_concurrent_jobs = 4
+    monkeypatch.setattr(api_server, "job_manager", fake)
+
+    result = asyncio.run(api_server.ops_get_scrape_settings())
+
+    assert result.max_concurrent_jobs == 4
+
+
+def test_update_scrape_settings_applies_new_limit(monkeypatch):
+    fake = _FakeJobManager()
+    monkeypatch.setattr(api_server, "job_manager", fake)
+
+    result = asyncio.run(
+        api_server.ops_update_scrape_settings(
+            api_server.UpdateScrapeSettingsRequest(max_concurrent_jobs=10)
+        )
+    )
+
+    assert result.max_concurrent_jobs == 10
+    assert fake.max_concurrent_jobs == 10
+    assert fake.updated_limits == [10]
 
 
 def test_progress_counts_exhausted_under_threshold_separately(tmp_path):
@@ -326,6 +359,43 @@ def test_ops_scrape_all_selects_under_threshold_targets(tmp_path):
         db.close()
 
 
+def test_ops_scrape_all_uses_text_reviews_for_threshold(tmp_path):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    fake = _FakeJobManager()
+    old_job_manager = api_server.job_manager
+    api_server.job_manager = fake
+    try:
+        cfg_path = tmp_path / "config.top50.yaml"
+        _write_config(cfg_path)
+
+        db.upsert_place(
+            "place_a",
+            "Place A",
+            "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+        )
+        for i in range(60):
+            db.upsert_review("place_a", _make_review(f"ra_{i}", text=""))
+
+        db.upsert_place(
+            "place_b",
+            "Place B",
+            "https://www.google.com/maps/search/?api=1&query=B&query_place_id=PID_B",
+        )
+        for i in range(5):
+            db.upsert_review("place_b", _make_review(f"rb_{i}"))
+
+        req = api_server.ScrapeAllRequest(config_path=str(cfg_path), min_reviews=50)
+        res = asyncio.run(api_server.ops_scrape_all(req, review_db=db))
+
+        created_qpids = {entry["google_place_id"] for entry in res["created_jobs"]}
+        assert "PID_A" in created_qpids
+        assert "PID_B" in created_qpids
+        assert "PID_C" in created_qpids
+    finally:
+        api_server.job_manager = old_job_manager
+        db.close()
+
+
 def test_ops_scrape_all_raises_target_max_reviews_floor(tmp_path):
     db = ReviewDB(str(tmp_path / "test.db"))
     fake = _FakeJobManager()
@@ -350,6 +420,55 @@ def test_ops_scrape_all_raises_target_max_reviews_floor(tmp_path):
         assert len(fake.created) == 3
         for row in fake.created:
             assert int(row["config_overrides"].get("max_reviews", 0)) >= 300
+    finally:
+        api_server.job_manager = old_job_manager
+        db.close()
+
+
+def test_ops_scrape_all_can_skip_known_totals_below_goal(tmp_path):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    fake = _FakeJobManager()
+    old_job_manager = api_server.job_manager
+    api_server.job_manager = fake
+    try:
+        cfg_path = tmp_path / "config.top50.yaml"
+        _write_config(cfg_path)
+
+        db.upsert_place(
+            "place_a",
+            "Place A",
+            "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+        )
+        for i in range(55):
+            db.upsert_review("place_a", _make_review(f"ra_{i}"))
+
+        db.upsert_place(
+            "place_b",
+            "Place B",
+            "https://www.google.com/maps/search/?api=1&query=B&query_place_id=PID_B",
+        )
+        for i in range(5):
+            db.upsert_review("place_b", _make_review(f"rb_{i}"))
+        db.backend.execute(
+            "UPDATE places SET total_reviews = ? WHERE place_id = ?",
+            (39, "place_b"),
+        )
+        db.backend.commit()
+
+        req = api_server.ScrapeAllRequest(
+            config_path=str(cfg_path),
+            min_reviews=50,
+            exclude_known_below_goal=True,
+        )
+        res = asyncio.run(api_server.ops_scrape_all(req, review_db=db))
+
+        assert res["selected_targets"] == 1  # C missing remains unknown and queueable
+        assert res["created_count"] == 1
+        assert len(fake.created) == 1
+        assert res["skipped_count"] == 1
+        assert res["skipped_targets"][0]["google_place_id"] == "PID_B"
+        assert res["skipped_targets"][0]["reason"] == "known_total_below_goal"
+        assert res["skipped_targets"][0]["cached_total_reviews"] == 39
     finally:
         api_server.job_manager = old_job_manager
         db.close()
@@ -448,7 +567,8 @@ def test_export_all_csv_endpoint_returns_flat_header(tmp_path):
         )
         assert resp.status_code == 200
         assert resp.media_type.startswith("text/csv")
-        text = resp.body.decode("utf-8")
+        assert resp.body.startswith(b"\xef\xbb\xbf")
+        text = resp.body.decode("utf-8-sig")
         assert "place_id,place_name,review_id" in text
         assert "place_a,Place A,r1" in text
     finally:
@@ -492,8 +612,139 @@ def test_export_place_csv_endpoint_returns_download(tmp_path):
             )
         )
         assert resp.status_code == 200
-        assert "place_id,place_name,review_id" in resp.body.decode("utf-8")
+        assert resp.body.startswith(b"\xef\xbb\xbf")
+        assert "place_id,place_name,review_id" in resp.body.decode("utf-8-sig")
         assert "attachment; filename=" in resp.headers.get("Content-Disposition", "")
+    finally:
+        db.close()
+
+
+def test_dataset_bundle_generate_and_latest_endpoints(tmp_path, monkeypatch):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATASET_EXPORT_LATEST_DIR", str(tmp_path / "latest_bundle"))
+    try:
+        cfg_path = tmp_path / "config.top50.yaml"
+        _write_config(cfg_path)
+
+        db.upsert_place(
+            "place_a",
+            "Place A",
+            "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+        )
+        db.upsert_review("place_a", _make_review("r1"))
+
+        request = api_server.DatasetBundleGenerateRequest(
+            config_path=str(cfg_path),
+            min_reviews=25,
+            include_deleted=False,
+        )
+        generated = asyncio.run(api_server.generate_dataset_bundle(request, review_db=db))
+
+        assert generated.output_dir == str((tmp_path / "latest_bundle").resolve())
+        assert generated.manifest["bundle_version"] == "dataset-quality-provenance-v2"
+        assert generated.qa_report_excerpt["summary"]["targets_total"] == 3
+        artifacts = {artifact.filename: artifact for artifact in generated.artifacts}
+        assert "reviews_cleaned.csv" in artifacts
+        assert "qa_report.json" in artifacts
+        assert artifacts["reviews_cleaned.csv"].previewable is True
+        assert artifacts["reviews_cleaned.csv"].preview_path.endswith("/reviews_cleaned.csv/preview")
+        assert artifacts["qa_report.json"].previewable is False
+
+        latest = asyncio.run(api_server.get_latest_dataset_bundle())
+        assert latest.output_dir == generated.output_dir
+        assert latest.manifest["config_path"] == str(cfg_path)
+    finally:
+        db.close()
+
+
+def test_dataset_bundle_latest_endpoint_404_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATASET_EXPORT_LATEST_DIR", str(tmp_path / "missing_bundle"))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api_server.get_latest_dataset_bundle())
+    assert exc.value.status_code == 404
+
+
+def test_dataset_bundle_artifact_download_endpoint_is_manifest_validated(tmp_path, monkeypatch):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATASET_EXPORT_LATEST_DIR", str(tmp_path / "latest_bundle"))
+    try:
+        cfg_path = tmp_path / "config.top50.yaml"
+        _write_config(cfg_path)
+
+        db.upsert_place(
+            "place_a",
+            "Place A",
+            "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+        )
+        db.upsert_review("place_a", _make_review("r1"))
+
+        request = api_server.DatasetBundleGenerateRequest(config_path=str(cfg_path))
+        asyncio.run(api_server.generate_dataset_bundle(request, review_db=db))
+
+        rogue_path = tmp_path / "latest_bundle" / "rogue.csv"
+        rogue_path.parent.mkdir(parents=True, exist_ok=True)
+        rogue_path.write_text("rogue\n", encoding="utf-8")
+
+        resp = asyncio.run(
+            api_server.download_latest_dataset_bundle_artifact("reviews_cleaned.csv")
+        )
+        assert resp.status_code == 200
+        assert resp.media_type.startswith("text/csv")
+        assert resp.headers.get("Content-Disposition", "").endswith('"reviews_cleaned.csv"')
+        assert resp.body.startswith(b"\xef\xbb\xbf")
+        assert b"review_id" in resp.body
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api_server.download_latest_dataset_bundle_artifact("rogue.csv"))
+        assert exc.value.status_code == 404
+    finally:
+        db.close()
+
+
+def test_dataset_bundle_artifact_preview_endpoint_returns_csv_rows_and_rejects_json(tmp_path, monkeypatch):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    monkeypatch.setenv("DATASET_EXPORT_LATEST_DIR", str(tmp_path / "latest_bundle"))
+    try:
+        cfg_path = tmp_path / "config.top50.yaml"
+        _write_config(cfg_path)
+
+        db.upsert_place(
+            "place_a",
+            "曹環",
+            "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+        )
+        for index in range(30):
+            db.upsert_review("place_a", _make_review(f"r{index}"))
+            db.backend.execute(
+                "UPDATE reviews SET review_text = ? WHERE review_id = ? AND place_id = ?",
+                (json.dumps({"zh-Hant": f"測試評論 {index}"}, ensure_ascii=False), f"r{index}", "place_a"),
+            )
+        db.backend.commit()
+
+        request = api_server.DatasetBundleGenerateRequest(config_path=str(cfg_path))
+        asyncio.run(api_server.generate_dataset_bundle(request, review_db=db))
+
+        preview = asyncio.run(
+            api_server.preview_latest_dataset_bundle_artifact("reviews_cleaned.csv")
+        )
+        assert preview.artifact.filename == "reviews_cleaned.csv"
+        assert preview.preview.kind == "csv"
+        assert preview.preview.columns[0] == "place_id"
+        assert preview.preview.sample_row_count == 25
+        assert preview.preview.total_row_count == 30
+        assert preview.preview.truncated is True
+        assert {row["review_text_raw"] for row in preview.preview.rows} == {
+            f"測試評論 {index}" for index in range(5, 30)
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api_server.preview_latest_dataset_bundle_artifact("qa_report.json"))
+        assert exc.value.status_code == 400
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api_server.preview_latest_dataset_bundle_artifact("rogue.csv"))
+        assert exc.value.status_code == 404
     finally:
         db.close()
 
@@ -545,7 +796,7 @@ def test_export_place_direct_call_honors_columns_and_exclude_empty_text(tmp_path
             )
         )
 
-        text = resp.body.decode("utf-8").splitlines()
+        text = resp.body.decode("utf-8-sig").splitlines()
         assert text[0] == "place_id,review_id,review_text_primary"
         assert text[1] == "place_a,r1,Great!"
         assert len(text) == 2
@@ -572,10 +823,37 @@ def test_export_all_direct_call_honors_columns_and_exclude_empty_text(tmp_path):
             )
         )
 
-        text = resp.body.decode("utf-8").splitlines()
+        text = resp.body.decode("utf-8-sig").splitlines()
         assert text[0] == "place_id,review_id,review_text_primary"
         assert text[1] == "place_a,r1,Great!"
         assert len(text) == 2
+    finally:
+        db.close()
+
+
+def test_export_all_direct_call_honors_min_review_count(tmp_path):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    try:
+        db.upsert_place("place_a", "Place A", "https://example.com/a")
+        db.upsert_place("place_b", "Place B", "https://example.com/b")
+        db.upsert_review("place_a", _make_review("r1"))
+        db.upsert_review("place_b", _make_review("r2"))
+        db.upsert_review("place_b", _make_review("r3"))
+
+        resp = asyncio.run(
+            api_server.export_all(
+                format="csv",
+                include_deleted=False,
+                min_review_count=2,
+                columns="place_id,review_id",
+                review_db=db,
+            )
+        )
+
+        text = resp.body.decode("utf-8-sig").splitlines()
+        assert text[0] == "place_id,review_id"
+        assert set(text[1:]) == {"place_b,r2", "place_b,r3"}
+        assert len(text) == 3
     finally:
         db.close()
 
@@ -787,6 +1065,18 @@ def test_approve_discovery_candidates_appends_businesses(tmp_path):
         assert refreshed[0]["status"] == "approved"
     finally:
         db.close()
+
+
+def test_dashboard_discovery_panel_does_not_truncate_candidates_to_40():
+    page_path = Path(__file__).resolve().parents[1] / "dashboard" / "src" / "app" / "page.tsx"
+    source = page_path.read_text(encoding="utf-8")
+
+    assert "const DISCOVERY_CANDIDATE_LIST_LIMIT = 200;" in source
+    assert re.search(
+        r"getDiscoveryCandidates\(\{\s*configPath:\s*CONFIG_PATH,\s*limit:\s*DISCOVERY_CANDIDATE_LIST_LIMIT\s*\}\)",
+        source,
+    )
+    assert "getDiscoveryCandidates({ configPath: CONFIG_PATH, limit: 40 })" not in source
 
 
 def test_ops_scrape_targets_queues_selected_google_place_ids(tmp_path):

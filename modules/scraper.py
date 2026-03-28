@@ -1830,6 +1830,38 @@ class GoogleReviewsScraper:
         )
 
     @staticmethod
+    def _scroll_content_progressed(
+        previous: Dict[str, Any] | None,
+        current: Dict[str, Any],
+        *,
+        discovered_card_ids: int = 0,
+        discovered_card_fingerprints: int = 0,
+    ) -> bool:
+        """Return True only when review coverage changed, not just scroll motion."""
+        if discovered_card_ids > 0 or discovered_card_fingerprints > 0:
+            return True
+        if previous is None:
+            return bool(
+                current.get("visible_count")
+                or current.get("first_card_id")
+                or current.get("last_card_id")
+            )
+        return any(
+            current.get(key) != previous.get(key)
+            for key in ("visible_count", "first_card_id", "last_card_id")
+        )
+
+    @staticmethod
+    def _effective_backfill_goal(max_reviews: int, total_reviews_hint: int | None) -> int:
+        """Cap backfill by the smaller of requested max_reviews and the page hint."""
+        configured_goal = max(0, int(max_reviews or 0))
+        if configured_goal <= 0:
+            return 0
+        if total_reviews_hint is None:
+            return configured_goal
+        return min(configured_goal, max(0, int(total_reviews_hint or 0)))
+
+    @staticmethod
     def _should_fail_for_review_gap(
         total_reviews_hint: int | None,
         known_reviews: int,
@@ -2632,6 +2664,8 @@ class GoogleReviewsScraper:
                 log.warning(f"Sort failed but continuing: {sort_error}")
             sort_confirmed_newest = sort_ok and sort_by == "newest"
 
+            backfill_needed = max_reviews > 0 and existing_seen_count < max_reviews
+
             # Early-stop only makes sense when reviews are sorted by newest.
             # If sort failed or sort_by isn't "newest", disable it.
             if stop_threshold > 0 and (not sort_confirmed_newest):
@@ -2641,11 +2675,7 @@ class GoogleReviewsScraper:
                     stop_threshold,
                 )
                 stop_threshold = 0
-            elif (
-                stop_threshold > 0
-                and max_reviews > 0
-                and existing_seen_count < max_reviews
-            ):
+            elif stop_threshold > 0 and backfill_needed:
                 log.info(
                     "Disabling early stop (stop_threshold=%d) for backfill: "
                     "existing reviews (%d) are below target max_reviews (%d).",
@@ -2697,6 +2727,10 @@ class GoogleReviewsScraper:
                 )
 
             total_reviews_hint = self._extract_total_reviews_hint(driver)
+            effective_backfill_goal = self._effective_backfill_goal(
+                max_reviews,
+                total_reviews_hint,
+            )
             if total_reviews_hint is not None:
                 log.info("%s Page total reviews hint: %d", job_tag, total_reviews_hint)
                 if logical_existing_count > total_reviews_hint:
@@ -2707,6 +2741,19 @@ class GoogleReviewsScraper:
                         logical_existing_count,
                         total_reviews_hint,
                     )
+            if (
+                backfill_needed
+                and effective_backfill_goal > 0
+                and existing_seen_count >= effective_backfill_goal
+            ):
+                log.info(
+                    "%s Existing reviews (%d) already meet effective backfill goal (%d); "
+                    "disabling backfill keepalive",
+                    job_tag,
+                    existing_seen_count,
+                    effective_backfill_goal,
+                )
+                backfill_needed = False
 
             # Use try-except to handle cases where the pane is not found
             pane = self._find_reviews_pane(driver, wait)
@@ -2780,6 +2827,14 @@ class GoogleReviewsScraper:
                     6,
                 )
                 zero_new_idle_limit = 6
+            if self.scrape_mode == "update" and backfill_needed:
+                log.info(
+                    "%s Backfill mode active: zero-new idle will not advance while scroll progress continues "
+                    "(existing=%d target=%d).",
+                    job_tag,
+                    existing_seen_count,
+                    max_reviews,
+                )
             consecutive_no_cards = 0  # Track how many times we find zero cards
             no_progress_iterations = 0
             generation_no_progress_iterations = 0
@@ -2802,6 +2857,14 @@ class GoogleReviewsScraper:
 
             def _current_known_total() -> int:
                 return logical_existing_count + len(session_new_ids)
+
+            def _backfill_in_progress() -> bool:
+                return (
+                    self.scrape_mode == "update"
+                    and backfill_needed
+                    and effective_backfill_goal > 0
+                    and _current_known_total() < effective_backfill_goal
+                )
 
             def _transport_failure_is_retryable(exc: Exception) -> bool:
                 message = str(exc or "")
@@ -2988,6 +3051,12 @@ class GoogleReviewsScraper:
                         discovered_card_ids=iteration_discovered_card_ids,
                         discovered_card_fingerprints=iteration_discovered_card_fingerprints,
                     )
+                    content_progressed = self._scroll_content_progressed(
+                        last_progress_snapshot,
+                        current_snapshot,
+                        discovered_card_ids=iteration_discovered_card_ids,
+                        discovered_card_fingerprints=iteration_discovered_card_fingerprints,
+                    )
                     if progress_made:
                         no_progress_iterations = 0
                         generation_no_progress_iterations = 0
@@ -3005,6 +3074,14 @@ class GoogleReviewsScraper:
                                 generation=scroll_target_generation,
                                 total_reviews_hint=total_reviews_hint,
                             )
+
+                    keep_browser_alive_for_backfill = bool(
+                        (not fresh_raws) and content_progressed and _backfill_in_progress()
+                    )
+                    if keep_browser_alive_for_backfill:
+                        idle = 0
+                        attempts = 0
+                        end_confirmation_scrolls_remaining = -1
 
                     for raw, fingerprint in fresh_raws:
                         review_dict = {
@@ -3115,47 +3192,89 @@ class GoogleReviewsScraper:
                         break
 
                     if not fresh_raws:
-                        idle += 1
-                        attempts += 1
-                        log.info(
-                            "%s No new reviews in this iteration (idle: %d/%d, attempts: %d/%d, total seen: %d)",
-                            job_tag,
-                            idle,
-                            max_idle,
-                            attempts,
-                            max_attempts,
-                            len(seen),
-                        )
                         if (
                             self.scrape_mode == "update"
-                            and not session_new_ids
-                            and idle >= zero_new_idle_limit
+                            and effective_backfill_goal > 0
+                            and _current_known_total() >= effective_backfill_goal
                         ):
-                            _maybe_raise_coverage_gap_transient(
-                                f"still 0 new reviews after {zero_new_idle_limit} idle attempts",
-                                current_snapshot,
-                            )
+                            if _consume_end_confirmation(
+                                "Known reviews already reached effective backfill goal "
+                                f"({_current_known_total()}/{effective_backfill_goal})"
+                            ):
+                                attempts += 1
+                                try:
+                                    strategy = self._scroll_strategy_for_no_progress(
+                                        max(no_progress_iterations, 1)
+                                    )
+                                    self._scroll_reviews_forward(
+                                        driver,
+                                        scroll_target,
+                                        cards[-1] if cards else None,
+                                        strategy=strategy,
+                                    )
+                                    time.sleep(1.0)
+                                except Exception as e:
+                                    log.warning(
+                                        "Error scrolling during backfill-goal confirmation pass: %s",
+                                        e,
+                                    )
+                                continue
                             log.info(
-                                "%s Stopping early: still 0 new reviews after %d idle attempts in update mode",
+                                "%s Stopping: known reviews already reached effective backfill goal (%d)",
                                 job_tag,
-                                zero_new_idle_limit,
+                                effective_backfill_goal,
                             )
                             break
-                        if (
-                            self.scrape_mode == "update"
-                            and not session_new_ids
-                            and total_reviews_hint is not None
-                            and _current_known_total() >= total_reviews_hint
-                            and idle >= 4
-                        ):
+                        if keep_browser_alive_for_backfill:
                             log.info(
-                                "%s Stopping early: DB already has %d reviews and page hint is %d (idle: %d)",
+                                "%s No new reviews yet, but scroll progressed while backfilling "
+                                "(known=%d/%d); keeping browser alive",
                                 job_tag,
                                 _current_known_total(),
-                                total_reviews_hint,
-                                idle,
+                                max_reviews,
                             )
-                            break
+                        else:
+                            idle += 1
+                            attempts += 1
+                            log.info(
+                                "%s No new reviews in this iteration (idle: %d/%d, attempts: %d/%d, total seen: %d)",
+                                job_tag,
+                                idle,
+                                max_idle,
+                                attempts,
+                                max_attempts,
+                                len(seen),
+                            )
+                            if (
+                                self.scrape_mode == "update"
+                                and not session_new_ids
+                                and idle >= zero_new_idle_limit
+                            ):
+                                _maybe_raise_coverage_gap_transient(
+                                    f"still 0 new reviews after {zero_new_idle_limit} idle attempts",
+                                    current_snapshot,
+                                )
+                                log.info(
+                                    "%s Stopping early: still 0 new reviews after %d idle attempts in update mode",
+                                    job_tag,
+                                    zero_new_idle_limit,
+                                )
+                                break
+                            if (
+                                self.scrape_mode == "update"
+                                and not session_new_ids
+                                and total_reviews_hint is not None
+                                and _current_known_total() >= total_reviews_hint
+                                and idle >= 4
+                            ):
+                                log.info(
+                                    "%s Stopping early: DB already has %d reviews and page hint is %d (idle: %d)",
+                                    job_tag,
+                                    _current_known_total(),
+                                    total_reviews_hint,
+                                    idle,
+                                )
+                                break
 
                     else:
                         log.info("%s Found %d new reviews in this iteration", job_tag, len(fresh_raws))

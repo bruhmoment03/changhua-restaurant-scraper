@@ -634,6 +634,29 @@ def test_scroll_progressed_treats_new_card_ids_as_progress():
     )
 
 
+def test_scroll_content_progressed_ignores_scroll_top_only_changes():
+    previous = {
+        "scroll_top": 11507,
+        "visible_count": 10,
+        "first_card_id": "review-1",
+        "last_card_id": "review-10",
+    }
+    current = {
+        "scroll_top": 11880,
+        "visible_count": 10,
+        "first_card_id": "review-1",
+        "last_card_id": "review-10",
+    }
+
+    assert GoogleReviewsScraper._scroll_content_progressed(previous, current) is False
+
+
+def test_effective_backfill_goal_caps_requested_max_by_page_hint():
+    assert GoogleReviewsScraper._effective_backfill_goal(300, 39) == 39
+    assert GoogleReviewsScraper._effective_backfill_goal(300, None) == 300
+    assert GoogleReviewsScraper._effective_backfill_goal(0, 39) == 0
+
+
 def test_transient_browser_error_includes_connection_refused():
     message = (
         "HTTPConnectionPool(host='localhost', port=53931): Max retries exceeded with url: "
@@ -857,6 +880,19 @@ def test_backfill_disables_stop_threshold_when_seen_below_max_reviews():
     source = inspect.getsource(GoogleReviewsScraper.scrape)
     assert "existing_seen_count < max_reviews" in source
     assert "Disabling early stop (stop_threshold=%d) for backfill" in source
+
+
+def test_backfill_progress_does_not_count_as_idle():
+    source = inspect.getsource(GoogleReviewsScraper.scrape)
+    assert "keep_browser_alive_for_backfill" in source
+    assert "No new reviews yet, but scroll progressed while backfilling" in source
+    assert "content_progressed" in source
+
+
+def test_backfill_stops_when_effective_goal_is_reached():
+    source = inspect.getsource(GoogleReviewsScraper.scrape)
+    assert "Known reviews already reached effective backfill goal" in source
+    assert "_effective_backfill_goal" in source
 
 
 def test_scrape_fail_fast_on_dead_browser_session_errors():

@@ -4,6 +4,7 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch
+import yaml
 
 from modules.review_db import ReviewDB
 
@@ -64,6 +65,62 @@ class TestExportCommand:
         )
         _run_export({}, args)
         assert Path(output_path).exists()
+
+
+class TestDatasetExportCommand:
+    def test_dataset_export_writes_bundle(self, tmp_path):
+        from modules.config import load_config
+        from start import _run_dataset_export
+        from types import SimpleNamespace
+
+        cfg_path = tmp_path / "config.top50.yaml"
+        cfg_path.write_text(
+            yaml.safe_dump(
+                {
+                    "db_path": str(tmp_path / "test.db"),
+                    "businesses": [
+                        {
+                            "url": "https://www.google.com/maps/search/?api=1&query=Alpha&query_place_id=PID_A",
+                            "custom_params": {"company": "Alpha", "google_place_id": "PID_A"},
+                        }
+                    ],
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+        db = ReviewDB(str(tmp_path / "test.db"))
+        try:
+            db.upsert_place(
+                "place_a",
+                "Place A",
+                "https://www.google.com/maps/search/?api=1&query=Alpha&query_place_id=PID_A",
+            )
+            db.upsert_review("place_a", _make_review("r1"))
+        finally:
+            db.close()
+
+        args = SimpleNamespace(
+            db_path=str(tmp_path / "test.db"),
+            config=cfg_path,
+            output_dir=str(tmp_path / "bundle"),
+            min_reviews=5,
+            include_deleted=False,
+        )
+        cfg = load_config(cfg_path)
+        _run_dataset_export(cfg, args)
+
+        assert (tmp_path / "bundle" / "reviews_raw.csv").exists()
+        assert (tmp_path / "bundle" / "reviews_cleaned.csv").exists()
+        assert (tmp_path / "bundle" / "restaurants_cleaned.csv").exists()
+        assert (tmp_path / "bundle" / "qa_samples_reviews_low_information.csv").exists()
+        assert (tmp_path / "bundle" / "qa_samples_reviews_duplicate_text.csv").exists()
+        assert (tmp_path / "bundle" / "qa_samples_reviews_format_anomalies.csv").exists()
+        assert (tmp_path / "bundle" / "qa_samples_targets_followup.csv").exists()
+        assert (tmp_path / "bundle" / "qa_report.json").exists()
+        assert (tmp_path / "bundle" / "dataset_manifest.json").exists()
 
 
 class TestDbStatsCommand:

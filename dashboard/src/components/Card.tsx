@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export function Card(props: { title?: string; children: ReactNode; right?: ReactNode; className?: string }) {
+export function Card(props: { title?: ReactNode; children: ReactNode; right?: ReactNode; className?: string }) {
   return (
     <div className={`rounded-2xl border border-border/60 bg-panel/80 shadow-card backdrop-blur-sm ${props.className || ""}`}>
       {(props.title || props.right) && (

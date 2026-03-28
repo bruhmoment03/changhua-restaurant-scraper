@@ -92,6 +92,17 @@ class TestPlaceOperations:
         row = next(p for p in places if p["place_id"] == "p1")
         assert row["total_reviews"] == 2
 
+    def test_list_places_live_review_counts_ignore_star_only(self, db):
+        db.upsert_place("p1", "Place 1", "http://1")
+        db.upsert_review("p1", _make_review("r1", text=""))
+        db.upsert_review("p1", _make_review("r2", text="Excellent"))
+        db.backend.execute("UPDATE places SET total_reviews = 99 WHERE place_id = 'p1'")
+        db.backend.commit()
+
+        places = db.list_places()
+        row = next(p for p in places if p["place_id"] == "p1")
+        assert row["total_reviews"] == 1
+
 
 class TestReviewOperations:
     """Review CRUD and dedup tests."""

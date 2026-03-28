@@ -25,6 +25,16 @@ log = logging.getLogger("scraper")
 
 SCHEMA_VERSION = 3
 
+
+def text_review_where_sql(alias: str = "") -> str:
+    """Return a SQL predicate for active reviews with non-empty review text."""
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"{prefix}is_deleted = 0 "
+        f"AND {prefix}review_text IS NOT NULL "
+        f"AND TRIM({prefix}review_text) NOT IN ('', '{{}}', 'null')"
+    )
+
 _SCHEMA_DDL = """
 -- Schema version tracking (single-row model)
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -256,6 +266,7 @@ class ReviewDB:
             yield
 
     def _place_select_sql(self) -> str:
+        text_review_where = text_review_where_sql()
         return (
             "SELECT p.place_id, p.place_name, p.original_url, p.resolved_url, "
             "p.latitude, p.longitude, p.first_seen, p.last_scraped, "
@@ -268,7 +279,7 @@ class ReviewDB:
             "FROM places p "
             "LEFT JOIN ("
             "  SELECT place_id, COUNT(*) AS review_count "
-            "  FROM reviews WHERE is_deleted = 0 GROUP BY place_id"
+            f"  FROM reviews WHERE {text_review_where} GROUP BY place_id"
             ") rc ON rc.place_id = p.place_id "
         )
 
@@ -395,7 +406,7 @@ class ReviewDB:
         return int(result.rowcount or 0)
 
     def rebuild_place_total_reviews(self, place_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Recompute cached place total_reviews from live active reviews."""
+        """Recompute cached place total_reviews from live text-bearing reviews."""
         if place_ids:
             normalized = [str(place_id).strip() for place_id in place_ids if str(place_id).strip()]
             if not normalized:
@@ -437,27 +448,29 @@ class ReviewDB:
         }
 
     def count_stale_place_totals(self) -> int:
+        text_review_where = text_review_where_sql("r")
         row = self.backend.fetchone(
             "SELECT COUNT(*) AS cnt "
             "FROM places p "
             "WHERE COALESCE(p.total_reviews, 0) != ("
-            "  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND r.is_deleted = 0"
+            f"  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND {text_review_where}"
             ")"
         )
         return int(row["cnt"] or 0) if row else 0
 
     def list_stale_place_totals(self, limit: int = 20) -> List[Dict[str, Any]]:
+        text_review_where = text_review_where_sql("r")
         return self.backend.fetchall(
             "SELECT p.place_id, p.place_name, COALESCE(p.total_reviews, 0) AS cached_total_reviews, "
             "("
-            "  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND r.is_deleted = 0"
+            f"  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND {text_review_where}"
             ") AS total_reviews "
             "FROM places p "
             "WHERE COALESCE(p.total_reviews, 0) != ("
-            "  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND r.is_deleted = 0"
+            f"  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND {text_review_where}"
             ") "
             "ORDER BY ABS(COALESCE(p.total_reviews, 0) - ("
-            "  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND r.is_deleted = 0"
+            f"  SELECT COUNT(*) FROM reviews r WHERE r.place_id = p.place_id AND {text_review_where}"
             ")) DESC, p.place_id "
             "LIMIT ?",
             (int(limit),),
@@ -961,9 +974,10 @@ class ReviewDB:
             stats[result] = stats.get(result, 0) + 1
 
         # Update place total_reviews
+        text_review_where = text_review_where_sql()
         count_row = self.backend.fetchone(
             "SELECT COUNT(*) as cnt FROM reviews "
-            "WHERE place_id = ? AND is_deleted = 0",
+            f"WHERE place_id = ? AND {text_review_where}",
             (place_id,)
         )
         if count_row:
@@ -1099,9 +1113,10 @@ class ReviewDB:
         self.backend.commit()
 
     def refresh_place_total_reviews(self, place_id: str) -> int:
-        """Recompute and persist total non-deleted reviews for a place."""
+        """Recompute and persist total non-deleted text reviews for a place."""
+        text_review_where = text_review_where_sql()
         row = self.backend.fetchone(
-            "SELECT COUNT(*) as cnt FROM reviews WHERE place_id = ? AND is_deleted = 0",
+            f"SELECT COUNT(*) as cnt FROM reviews WHERE place_id = ? AND {text_review_where}",
             (place_id,),
         )
         count = int(row["cnt"]) if row else 0
@@ -2148,7 +2163,10 @@ _MIGRATIONS: Dict[int, List[str]] = {
         SET total_reviews = (
             SELECT COUNT(*)
             FROM reviews r
-            WHERE r.place_id = places.place_id AND r.is_deleted = 0
+            WHERE r.place_id = places.place_id
+              AND r.is_deleted = 0
+              AND r.review_text IS NOT NULL
+              AND TRIM(r.review_text) NOT IN ('', '{}', 'null')
         );
         """,
     ],

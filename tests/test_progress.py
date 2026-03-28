@@ -147,3 +147,35 @@ def test_threshold_fields_are_derived_from_min_reviews(tmp_path):
         assert by_qpid["PID_C"]["reviews_needed"] == 50
     finally:
         db.close()
+
+
+def test_threshold_ignores_star_only_reviews(tmp_path):
+    db = ReviewDB(str(tmp_path / "test.db"))
+    try:
+        businesses = [
+            {
+                "url": "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+                "custom_params": {"company": "A", "google_place_id": "PID_A"},
+            },
+        ]
+
+        db.upsert_place(
+            "place_a",
+            "Place A",
+            "https://www.google.com/maps/search/?api=1&query=A&query_place_id=PID_A",
+        )
+        for i in range(75):
+            review = _make_review(f"a_{i}")
+            review["text"] = ""
+            db.upsert_review("place_a", review)
+
+        report = compute_progress_report(businesses, db, min_reviews=50)
+        target = report["targets"][0]
+        assert target["status"] == "present_zero_reviews"
+        assert target["review_count"] == 0
+        assert target["meets_min_reviews"] is False
+        assert target["reviews_needed"] == 50
+        assert report["meeting_min_reviews"] == 0
+        assert report["under_min_reviews"] == 1
+    finally:
+        db.close()

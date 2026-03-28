@@ -5,6 +5,7 @@ Subcommands:
   scrape          Scrape reviews (default behavior)
   progress        Show config-vs-DB progress for batch scraping
   export          Export reviews from DB to JSON/CSV
+  dataset-export  Export a config-scoped dataset bundle
   db-stats        Show database statistics
   clear           Clear data for a place or all places
   hide            Soft-delete a review
@@ -214,6 +215,24 @@ def _build_export_parser(sub: argparse._SubParsersAction) -> None:
     )
 
 
+def _build_dataset_export_parser(sub: argparse._SubParsersAction) -> None:
+    """Build the 'dataset-export' subcommand."""
+    sp = sub.add_parser("dataset-export", help="Export a config-scoped derived dataset bundle")
+    _add_common_args(sp)
+    sp.add_argument(
+        "--output-dir", "-o", type=str, default="dataset_export",
+        help="directory for derived dataset bundle artifacts (default: dataset_export)",
+    )
+    sp.add_argument(
+        "--min-reviews", type=int, default=100,
+        help="minimum review threshold for QA reporting (default: 100)",
+    )
+    sp.add_argument(
+        "--include-deleted", action="store_true",
+        help="include soft-deleted reviews in exported review artifacts",
+    )
+
+
 def _build_management_parsers(sub: argparse._SubParsersAction) -> None:
     """Build management subcommands."""
     # progress
@@ -364,6 +383,7 @@ def parse_arguments():
 
     _build_scrape_parser(sub)
     _build_export_parser(sub)
+    _build_dataset_export_parser(sub)
     _build_management_parsers(sub)
     _build_api_key_parsers(sub)
     _build_logs_parser(sub)

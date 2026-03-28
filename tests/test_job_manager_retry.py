@@ -195,3 +195,40 @@ def test_shutdown_cancels_running_job_without_retry(monkeypatch):
         assert delays == []
     finally:
         manager.shutdown()
+
+
+def test_job_manager_can_update_live_concurrency(monkeypatch):
+    executors = []
+
+    class _FakeExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+            self.shutdown_calls = []
+            executors.append(self)
+
+        def submit(self, *_args, **_kwargs):
+            return None
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setattr(jm, "ThreadPoolExecutor", _FakeExecutor)
+
+    manager = jm.JobManager(max_concurrent_jobs=1)
+    try:
+        promoted = {"count": 0}
+        monkeypatch.setattr(
+            manager,
+            "_promote_pending_jobs",
+            lambda: promoted.__setitem__("count", promoted["count"] + 1),
+        )
+
+        updated = manager.set_max_concurrent_jobs(10)
+
+        assert updated == 10
+        assert manager.max_concurrent_jobs == 10
+        assert len(executors) == 2
+        assert executors[0].shutdown_calls == [(False, False)]
+        assert promoted["count"] == 1
+    finally:
+        manager.shutdown()

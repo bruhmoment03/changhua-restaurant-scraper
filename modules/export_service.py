@@ -7,6 +7,7 @@ import io
 import json
 import re
 from pathlib import Path
+from collections import Counter
 from typing import Any, Dict, List, Literal, Tuple
 
 from modules.review_db import ReviewDB
@@ -84,16 +85,52 @@ def _filter_empty_text(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
-def _to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
+def _filter_min_review_count_per_place(
+    payload: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+    min_review_count: int | None,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    threshold = max(0, int(min_review_count or 0))
+    if threshold <= 0:
+        return payload, rows
+
+    counts = Counter(str(row.get("place_id") or "") for row in rows if str(row.get("place_id") or ""))
+    keep_place_ids = {place_id for place_id, count in counts.items() if count >= threshold}
+
+    filtered_rows = [
+        row for row in rows
+        if str(row.get("place_id") or "") in keep_place_ids
+    ]
+
+    next_payload = dict(payload)
+    next_payload["places"] = [
+        place for place in list(payload.get("places") or [])
+        if str(place.get("place_id") or "") in keep_place_ids
+    ]
+    next_payload["reviews_by_place"] = {
+        place_id: place_rows
+        for place_id, place_rows in dict(payload.get("reviews_by_place") or {}).items()
+        if str(place_id or "") in keep_place_ids
+    }
+    export_meta = dict(next_payload.get("export_meta") or {})
+    export_meta["min_review_count"] = threshold
+    next_payload["export_meta"] = export_meta
+    return next_payload, filtered_rows
+
+
+def _to_csv_bytes(rows: List[Dict[str, Any]], columns: List[str] | None = None) -> bytes:
+    cols = columns or CSV_COLUMNS
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+    writer = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
         writer.writerow(row)
-    return buf.getvalue().encode("utf-8")
+    # Emit UTF-8 BOM so spreadsheet apps recognize Chinese and other non-ASCII
+    # text correctly when users open downloaded CSV files directly.
+    return buf.getvalue().encode("utf-8-sig")
 
 
-def _to_xlsx_single_place(payload: Dict[str, Any], rows: List[Dict[str, Any]], sheet_name: str | None = None) -> bytes:
+def _to_xlsx_single_place(payload: Dict[str, Any], rows: List[Dict[str, Any]], sheet_name: str | None = None, columns: List[str] | None = None) -> bytes:
     try:
         from openpyxl import Workbook
     except ImportError as e:
@@ -117,19 +154,20 @@ def _to_xlsx_single_place(payload: Dict[str, Any], rows: List[Dict[str, Any]], s
     summary.append(["db_path_basename", meta.get("db_path_basename", "")])
     summary.append(["active_conflict_groups", meta.get("active_conflict_groups", 0)])
 
+    cols = columns or CSV_COLUMNS
     reviews_sheet_name = sheet_name or "reviews"
     reviews_sheet_name = INVALID_SHEET_CHARS.sub("_", reviews_sheet_name).strip()[:31] or "reviews"
     ws = wb.create_sheet(reviews_sheet_name)
-    ws.append(CSV_COLUMNS)
+    ws.append(cols)
     for row in rows:
-        ws.append([row.get(name, "") for name in CSV_COLUMNS])
+        ws.append([row.get(name, "") for name in cols])
 
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
 
 
-def _to_xlsx_all_places(payload: Dict[str, Any], rows: List[Dict[str, Any]], sheet_name: str | None = None) -> bytes:
+def _to_xlsx_all_places(payload: Dict[str, Any], rows: List[Dict[str, Any]], sheet_name: str | None = None, columns: List[str] | None = None) -> bytes:
     try:
         from openpyxl import Workbook
     except ImportError as e:
@@ -148,6 +186,7 @@ def _to_xlsx_all_places(payload: Dict[str, Any], rows: List[Dict[str, Any]], she
     index.title = index_title
     index.append(["place_id", "place_name", "row_count"])
 
+    cols = columns or CSV_COLUMNS
     used_sheet_names = {index_title}
     for place in places:
         place_id = str(place.get("place_id") or "")
@@ -158,13 +197,21 @@ def _to_xlsx_all_places(payload: Dict[str, Any], rows: List[Dict[str, Any]], she
         per_place_sheet_base = place_name or place_id or "place"
         per_place_sheet_name = _safe_sheet_name(per_place_sheet_base, used_sheet_names)
         ws = wb.create_sheet(per_place_sheet_name)
-        ws.append(CSV_COLUMNS)
+        ws.append(cols)
         for row in place_rows:
-            ws.append([row.get(name, "") for name in CSV_COLUMNS])
+            ws.append([row.get(name, "") for name in cols])
 
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+def _validate_columns(columns: List[str] | None) -> List[str] | None:
+    """Return only columns that exist in CSV_COLUMNS, preserving order."""
+    if not columns:
+        return None
+    valid = [c for c in columns if c in CSV_COLUMNS]
+    return valid or None
 
 
 def build_place_export(
@@ -174,20 +221,22 @@ def build_place_export(
     include_deleted: bool = False,
     exclude_empty_text: bool = False,
     sheet_name: str | None = None,
+    columns: List[str] | None = None,
 ) -> Tuple[bytes, str, str]:
     payload = review_db.export_place_json_payload(place_id, include_deleted=include_deleted)
     rows = review_db.export_place_flat_rows(place_id, include_deleted=include_deleted)
     if exclude_empty_text:
         rows = _filter_empty_text(rows)
 
+    cols = _validate_columns(columns)
     safe_pid = _safe_name(place_id)
     if fmt == "json":
         return _to_json_bytes(payload), "application/json", f"reviews_{safe_pid}.json"
     if fmt == "csv":
-        return _to_csv_bytes(rows), "text/csv; charset=utf-8", f"reviews_{safe_pid}.csv"
+        return _to_csv_bytes(rows, columns=cols), "text/csv; charset=utf-8", f"reviews_{safe_pid}.csv"
     if fmt == "xlsx":
         return (
-            _to_xlsx_single_place(payload, rows, sheet_name=sheet_name),
+            _to_xlsx_single_place(payload, rows, sheet_name=sheet_name, columns=cols),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             f"reviews_{safe_pid}.xlsx",
         )
@@ -199,20 +248,24 @@ def build_all_export(
     fmt: ExportFormat,
     include_deleted: bool = False,
     exclude_empty_text: bool = False,
+    min_review_count: int | None = None,
     sheet_name: str | None = None,
+    columns: List[str] | None = None,
 ) -> Tuple[bytes, str, str]:
     payload = review_db.export_all_json_payload(include_deleted=include_deleted)
     rows = review_db.export_all_flat_rows(include_deleted=include_deleted)
     if exclude_empty_text:
         rows = _filter_empty_text(rows)
+    payload, rows = _filter_min_review_count_per_place(payload, rows, min_review_count)
 
+    cols = _validate_columns(columns)
     if fmt == "json":
         return _to_json_bytes(payload), "application/json", "reviews_all.json"
     if fmt == "csv":
-        return _to_csv_bytes(rows), "text/csv; charset=utf-8", "reviews_all.csv"
+        return _to_csv_bytes(rows, columns=cols), "text/csv; charset=utf-8", "reviews_all.csv"
     if fmt == "xlsx":
         return (
-            _to_xlsx_all_places(payload, rows, sheet_name=sheet_name),
+            _to_xlsx_all_places(payload, rows, sheet_name=sheet_name, columns=cols),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "reviews_all.xlsx",
         )

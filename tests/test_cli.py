@@ -67,6 +67,13 @@ class TestParseArguments:
             assert args.format == "csv"
             assert args.output == "/tmp/out"
 
+    def test_dataset_export(self):
+        with patch("sys.argv", ["start.py", "dataset-export", "--output-dir", "/tmp/dataset", "--min-reviews", "25"]):
+            args = parse_arguments()
+            assert args.command == "dataset-export"
+            assert args.output_dir == "/tmp/dataset"
+            assert args.min_reviews == 25
+
     def test_db_stats(self):
         with patch("sys.argv", ["start.py", "db-stats"]):
             args = parse_arguments()
